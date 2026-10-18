@@ -38,6 +38,7 @@ object Policy {
     }
 
     /** Suspend anything installed < 15 min ago, unsuspend everything else. */
+    /** Suspend new installs (<15 min) and protected apps whose unlock window has ended. */
     fun sweep(c: Context) {
         if (!isOwner(c)) return
         val dpm = dpm(c)
@@ -47,19 +48,32 @@ object Policy {
         val homePkg = pm.resolveActivity(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
         )?.activityInfo?.packageName
+        val protectedApps = Store.protectedApps(c)
+        val gateClosed = now >= Store.unlockedUntil(c)
 
         for (pkg in pm.getInstalledPackages(0)) {
             val info = pkg.applicationInfo ?: continue
-            if (info.flags and ApplicationInfo.FLAG_SYSTEM != 0) continue
             val name = pkg.packageName
+            val isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
+            val isProtected = name in protectedApps
+            if (isSystem && !isProtected) continue
             if (name == c.packageName || name == homePkg) continue
 
-            val shouldLock = (now - pkg.firstInstallTime) in 0 until LOCK_MS
+            val newInstall = !isSystem && ((now - pkg.firstInstallTime) in 0 until LOCK_MS)
+            val shouldLock = newInstall || (isProtected && gateClosed)
             try {
                 if (dpm.isPackageSuspended(admin, name) != shouldLock) {
                     dpm.setPackagesSuspended(admin, arrayOf(name), shouldLock)
                 }
             } catch (_: Exception) { /* package vanished mid-sweep */ }
         }
+    }
+
+    /** Immediately unsuspend packages (used when an app is removed from the protected list). */
+    fun release(c: Context, packages: Collection<String>) {
+        if (!isOwner(c) || packages.isEmpty()) return
+        try {
+            dpm(c).setPackagesSuspended(admin(c), packages.toTypedArray(), false)
+        } catch (_: Exception) { }
     }
 }
