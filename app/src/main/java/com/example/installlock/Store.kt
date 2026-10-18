@@ -11,6 +11,22 @@ object Store {
     const val UNLOCK_MS = 30 * 60 * 1000L
     private val DEFAULT_PROTECTED = setOf("com.google.android.youtube", "com.android.chrome")
 
+    private val DEFAULT_BLOCKED = setOf(
+        "encrypted-tbn0.gstatic.com", "encrypted-tbn1.gstatic.com",
+        "encrypted-tbn2.gstatic.com", "encrypted-tbn3.gstatic.com",
+        "ytimg.com", "googlevideo.com", "ggpht.com", "googleusercontent.com"
+    )
+
+    fun blockedDomains(c: Context): Set<String> =
+        p(c).getStringSet("blockedDomains", DEFAULT_BLOCKED)!!.toSet()
+
+    fun setBlockedDomains(c: Context, s: Set<String>) =
+        p(c).edit().putStringSet("blockedDomains", s).apply()
+
+    /** A rule blocks the domain itself and all its subdomains. */
+    fun isBlocked(c: Context, name: String): Boolean =
+        blockedDomains(c).any { name == it || name.endsWith(".$it") }
+
     private fun p(c: Context) = c.getSharedPreferences("install_lock", Context.MODE_PRIVATE)
 
     fun hasPassword(c: Context) = p(c).contains("hash")

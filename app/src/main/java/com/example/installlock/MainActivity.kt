@@ -12,7 +12,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
-
+import android.widget.Toast
 class MainActivity : Activity() {
 
     companion object {
@@ -117,10 +117,61 @@ class MainActivity : Activity() {
                 render()
             },
             button("Choose protected apps") { showAppPicker() },
+            button("Google app filter") { showGoogleFilter() },
             button("Change password") { showChangePassword() }
         )
     }
 
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
+    private fun showGoogleFilter() {
+        val msg = label("")
+        screen(
+            label("Google app: block images & videos", 22f),
+            label("Routes only the Google app's DNS lookups through Install Lock and refuses " +
+                    "the servers that serve images and videos. Other apps aren't affected."),
+            msg,
+            button("Turn on") { msg.text = Policy.enableGoogleFilter(this) },
+            button("Turn off") { msg.text = Policy.disableGoogleFilter(this) },
+            button("DNS log / tune blocklist") { showDnsLog() },
+            button("Back") { render() }
+        )
+    }
+
+    private fun showDnsLog() {
+        val entries = DnsLog.recent()
+        val list = ListView(this)
+        list.adapter = ArrayAdapter(
+            this, android.R.layout.simple_list_item_1,
+            entries.map { (if (it.second) "✗  " else "✓  ") + it.first }
+        )
+        list.setOnItemClickListener { _, _, i, _ ->
+            val name = entries[i].first
+            val rules = Store.blockedDomains(this).toMutableSet()
+            val hits = rules.filter { name == it || name.endsWith(".$it") }
+            if (hits.isEmpty()) {
+                rules.add(name)
+                toast("Blocking $name")
+            } else {
+                rules.removeAll(hits.toSet())
+                toast("Unblocked. Removed rule: ${hits.joinToString()}")
+            }
+            Store.setBlockedDomains(this, rules)
+            showDnsLog()
+        }
+        val refresh = button("Refresh") { showDnsLog() }
+        val back = button("Back") { showGoogleFilter() }
+
+        val col = LinearLayout(this)
+        col.orientation = LinearLayout.VERTICAL
+        col.setPadding(dp(16), dp(48), dp(16), dp(16))
+        col.addView(label("Google app DNS log", 22f))
+        col.addView(label("✗ blocked, ✓ allowed. Tap a name to block or unblock it."))
+        col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        col.addView(refresh)
+        col.addView(back)
+        setContentView(col)
+    }
     private fun showChangePassword() {
         val old = passwordField("Current password")
         val p1 = passwordField("New password")

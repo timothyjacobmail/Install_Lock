@@ -69,6 +69,27 @@ object Policy {
         }
     }
 
+    fun enableGoogleFilter(c: Context): String {
+        if (!isOwner(c)) return "Not device owner."
+        return try {
+            dpm(c).setAlwaysOnVpnPackage(admin(c), c.packageName, false)  // false = fail open
+            c.startService(Intent(c, DnsFilterService::class.java))
+            "Filter is on. Check Settings → VPN: you should see Install Lock DNS filter."
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+    }
+
+    fun disableGoogleFilter(c: Context): String {
+        if (!isOwner(c)) return "Not device owner."
+        return try {
+            dpm(c).setAlwaysOnVpnPackage(admin(c), null, false)
+            c.stopService(Intent(c, DnsFilterService::class.java))
+            "Filter is off."
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+    }
     /** Immediately unsuspend packages (used when an app is removed from the protected list). */
     fun release(c: Context, packages: Collection<String>) {
         if (!isOwner(c) || packages.isEmpty()) return
