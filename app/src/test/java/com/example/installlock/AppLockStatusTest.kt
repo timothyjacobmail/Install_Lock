@@ -86,4 +86,19 @@ class AppLockStatusTest {
         assertEquals(1, vpnRestoredFirst.descriptions().size)
         assertFalse(accessibilityRestored.copy(googleVpnMissing = false).shouldLock)
     }
+
+    @Test fun verifiedCategoryExplainsAnInstallWaitExemption() {
+        val status = AppLockStatus("example.music", "Music app", AppLockReasons(), false, "Music & Audio")
+        assertFalse(status.needsAttention)
+        assertTrue(status.explanation().contains("has no active app lock"))
+        assertTrue(status.explanation().contains("waiting period skipped: verified Google Play category Music & Audio"))
+    }
+
+    @Test fun categoryExemptionsDoNotHideOtherReasonsAnAppIsLocked() {
+        val status = AppLockStatus("example.finance", "Finance app", AppLockReasons(appLock = true), true, "Finance")
+        assertTrue(status.needsAttention)
+        assertTrue(status.explanation().contains("is locked because"))
+        assertTrue(status.explanation().contains("waiting period skipped"))
+        assertTrue(status.explanation().contains("selected in App locks"))
+    }
 }

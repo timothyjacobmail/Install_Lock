@@ -3,6 +3,7 @@ package com.example.installlock
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -71,6 +72,9 @@ class MainActivity : Activity() {
             label("All current reasons are listed below. Each active reason must be cleared before an app can open. " +
                     "Tap Refresh after changing a setting or waiting for a timer."),
             label("Checked at " + DateFormat.getTimeInstance().format(Date())),
+            label("Google Play apps in Music & Audio, Finance and Shopping skip the new-app wait once their category is verified. " +
+                    "The first check needs internet access and may take a few seconds. If verification is unavailable, " +
+                    "the normal wait applies. Other locks still apply."),
             button("Refresh") { reopen() },
             button("Android accessibility settings") {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -282,7 +286,7 @@ class MainActivity : Activity() {
 
     private fun showLogin() {
         val pw = passwordField("Password")
-        val msg = label("")
+        val msg = label("").apply { setTextColor(Color.RED) }
         val status = label(unlockStatus())
         val locks = Policy.lockStatuses(this)
         fun waitText(ms: Long) = "Too many attempts. Try again in ${(ms + 59_999) / 60_000} min."
@@ -293,10 +297,15 @@ class MainActivity : Activity() {
             label("Enter your password."),
             pw, msg,
             button("Unlock") {
+                val password = pw.text.toString()
+                if (password.isBlank()) {
+                    msg.text = "Enter password"
+                    return@button
+                }
                 val wait = Store.lockoutRemainingMs(this)
                 if (wait > 0) {
                     msg.text = waitText(wait)
-                } else if (Store.checkPassword(this, pw.text.toString())) {
+                } else if (Store.checkPassword(this, password)) {
                     authed = true
                     render()
                 } else {
@@ -347,6 +356,8 @@ class MainActivity : Activity() {
             button("Why apps are locked") { goTo { showLockReasons() } },
             button("Extra locked sites") { goTo { showExtraLockedSites() } },
             label("New apps are suspended for ${timings[TimingOption.INSTALL_WAIT]} minutes after install."),
+            label("Google Play Music & Audio, Finance and Shopping apps skip this wait after category verification. " +
+                    "The first check needs internet access; other protections still apply."),
             label(unlockStatus()),
             label("Chrome lock: " + (if (Store.chromeLock(this)) "ON (whitelist only)" else "off")),
             label("Unlock for how many minutes? (max $maxUnlock)"),
@@ -709,16 +720,21 @@ class MainActivity : Activity() {
             Store.Pw.APP_LOCK -> "app-lock password"
         }
         val pw = passwordField(passwordName.replaceFirstChar { it.uppercase() })
-        val msg = label("")
+        val msg = label("").apply { setTextColor(Color.RED) }
         screen(
             label(title, 22f),
             label("Enter the $passwordName."),
             pw, msg,
             button("Confirm") {
+                val password = pw.text.toString()
+                if (password.isBlank()) {
+                    msg.text = "Enter password"
+                    return@button
+                }
                 val wait = Store.lockoutRemainingMs(this, which)
                 if (wait > 0) {
                     msg.text = "Too many attempts. Try again in ${(wait + 59_999) / 60_000} min."
-                } else if (verify(pw.text.toString())) {
+                } else if (verify(password)) {
                     action()
                 } else {
                     val w = Store.lockoutRemainingMs(this, which)

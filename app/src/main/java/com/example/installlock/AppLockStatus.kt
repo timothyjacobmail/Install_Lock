@@ -49,7 +49,8 @@ data class AppLockStatus(
     val packageName: String,
     val appName: String,
     val reasons: AppLockReasons,
-    val suspended: Boolean?
+    val suspended: Boolean?,
+    val installWaitExemption: String? = null
 ) {
     val needsAttention: Boolean get() = reasons.shouldLock || suspended != false
 
@@ -63,6 +64,9 @@ data class AppLockStatus(
             null -> "$appName's Android lock status could not be checked." +
                     if (reasons.shouldLock) " Current lock reasons:" else " Tap Refresh to retry."
         }
-        return (listOf(heading) + reasons.descriptions().map { "\u2022 $it" }).joinToString("\n")
+        val exemption = installWaitExemption?.let {
+            "New-app waiting period skipped: verified Google Play category $it. Other protections still apply."
+        }
+        return (listOfNotNull(heading, exemption) + reasons.descriptions().map { "\u2022 $it" }).joinToString("\n")
     }
 }

@@ -94,6 +94,8 @@ object Store {
 
     /** True if correct. Wrong guesses trigger escalating lockouts. */
     fun checkPassword(c: Context, pw: String, which: Pw = Pw.MAIN): Boolean {
+        // Missing input is not a password guess, and some Android crypto providers reject empty keys.
+        if (pw.isBlank()) return false
         val k = which.prefix
         val prefs = p(c)
         if (lockoutRemainingMs(c, which) > 0) return false

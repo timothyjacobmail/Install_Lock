@@ -88,14 +88,14 @@ object Policy {
         val neverRules = Store.neverInstall(c)
         val statuses = mutableListOf<AppLockStatus>()
 
-        fun record(pkg: PackageInfo, info: ApplicationInfo, reasons: AppLockReasons) {
+        fun record(pkg: PackageInfo, info: ApplicationInfo, reasons: AppLockReasons, categoryExemption: String? = null) {
             if (!collectStatus) return
             val suspended = try { dpm.isPackageSuspended(admin, pkg.packageName) }
                 catch (_: Exception) { null }
             // Keep managed apps visible when unlocked, and include any unexpected suspension.
             if (reasons.shouldLock || suspended != false || pkg.packageName in protectedApps ||
-                pkg.packageName == CHROME || pkg.packageName == BrowserPackages.GOOGLE_APP) {
-                statuses.add(AppLockStatus(pkg.packageName, info.loadLabel(pm).toString(), reasons, suspended))
+                pkg.packageName == CHROME || pkg.packageName == BrowserPackages.GOOGLE_APP || categoryExemption != null) {
+                statuses.add(AppLockStatus(pkg.packageName, info.loadLabel(pm).toString(), reasons, suspended, categoryExemption))
             }
         }
 
@@ -132,14 +132,15 @@ object Policy {
                 continue
             }
 
-            val newInstall = !isSystem && ((now - pkg.firstInstallTime) in
-                    0 until timings.milliseconds(TimingOption.INSTALL_WAIT))
+            val installWaitMs = timings.milliseconds(TimingOption.INSTALL_WAIT)
+            val newInstall = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now, installWaitMs) != null
+            val categoryExemption = if (newInstall && neverRule == null) PlayCategoryLookup.exemption(c, pkg) else null
             val reasons = AppLockReasons(
                 keywordServiceMissing = keywordPaused,
                 accessibilityEnabled = accessibilityEnabled,
                 appLock = isProtected && gateClosed,
-                installWaitUntil = if (newInstall)
-                    pkg.firstInstallTime + timings.milliseconds(TimingOption.INSTALL_WAIT) else null,
+                installWaitUntil = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now,
+                    installWaitMs, categoryExemption),
                 otherBrowser = isBrowser,
                 curboxMissing = isGuarded && curboxDown,
                 neverInstallRule = neverRule,
@@ -154,7 +155,7 @@ object Policy {
             } catch (_: Exception) {
                 if (name in previousKeywordGuard) keywordReleaseRetries.add(name)
             }
-            record(pkg, info, reasons)
+            record(pkg, info, reasons, categoryExemption?.title)
             if (neverRule != null) requestUninstall(c, name)
         }
         Store.setKeywordGuardPackages(c, keywordBrowsers + keywordReleaseRetries)

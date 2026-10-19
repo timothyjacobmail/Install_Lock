@@ -22,6 +22,28 @@ class SettingsStoreTest {
     fun cleanUp() { prefs.edit().clear().commit() }
 
     @Test
+    fun blankPasswordsAreRejectedWithoutConsumingAttemptsForAnyPasswordRole() {
+        for (role in Store.Pw.entries) {
+            Store.setPassword(context, "Password123", role)
+            assertFalse(Store.checkPassword(context, "wrong", role))
+            repeat(6) {
+                assertFalse(Store.checkPassword(context, "", role))
+                assertFalse(Store.checkPassword(context, " \t\n", role))
+            }
+            assertEquals(1, prefs.getInt(role.prefix + "fails", 0))
+            assertEquals(0L, Store.lockoutRemainingMs(context, role))
+            assertTrue(Store.checkPassword(context, "Password123", role))
+        }
+    }
+
+    @Test
+    fun nonblankPasswordsKeepTheirLeadingAndTrailingSpaces() {
+        Store.setPassword(context, " Password123 ", Store.Pw.MAIN)
+        assertFalse(Store.checkPassword(context, "Password123", Store.Pw.MAIN))
+        assertTrue(Store.checkPassword(context, " Password123 ", Store.Pw.MAIN))
+    }
+
+    @Test
     fun settingsPasswordAndFailedAttemptsAreIndependent() {
         Store.setPassword(context, "MainPass1", Store.Pw.MAIN)
         Store.setPassword(context, "FilterPass2", Store.Pw.FILTER)
