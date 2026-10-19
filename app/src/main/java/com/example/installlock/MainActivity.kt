@@ -1,9 +1,11 @@
 package com.example.installlock
 
-import android.app.Activity
-import android.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.google.android.material.color.DynamicColors
+import com.google.android.material.switchmaterial.SwitchMaterial
 import android.content.Intent
-import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -22,7 +24,6 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Switch
 import android.widget.Spinner
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -33,7 +34,7 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
 
     companion object {
         // Cleared when the app leaves the screen
@@ -166,6 +167,7 @@ class MainActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         readSharedSite(intent)
         window.setDecorFitsSystemWindows(false)   // consistent edge-to-edge; show() adds the padding
@@ -326,15 +328,18 @@ class MainActivity : Activity() {
 
     private fun showLogin() {
         val pw = passwordField("Password")
-        val msg = label("").apply { setTextColor(Color.RED) }
+        val msg = errorLabel()
         val status = label(unlockStatus())
         val locks = Policy.lockStatuses(this)
         fun waitText(ms: Long) = "Too many attempts. Try again in ${(ms + 59_999) / 60_000} min."
         screen(
+            UiStyle.eyebrow(this, "DEVICE PROTECTION"),
             label("Install Lock", 26f),
+            UiStyle.card(this,
+            label("Open your dashboard", 20f),
             label("Enter your main password to open the dashboard."),
             pw, msg,
-            button("Unlock") {
+            UiStyle.button(this, "Unlock", primary = true) {
                 val password = pw.text.toString()
                 if (password.isBlank()) {
                     msg.text = "Enter password"
@@ -350,7 +355,8 @@ class MainActivity : Activity() {
                     val w = Store.lockoutRemainingMs(this)
                     msg.text = if (w > 0) waitText(w) else "Wrong password."
                 }
-            },
+            }),
+            UiStyle.eyebrow(this, "PROTECTION TOOLS"),
             button("Why apps are locked") { goTo { showLockReasons() } },
             browserActions(),
             section("Apps", "Choose apps to lock or end an unlock session",
@@ -361,7 +367,8 @@ class MainActivity : Activity() {
                     reopen()
                 }),
             section("Settings & passwords", "Separate password required for settings",
-                button("Settings") { openSettings() }),
+                button("Settings") { openSettings() },
+                button("About & licenses") { goTo { showAbout() } }),
             section("Protection status", "Current app and browser protection",
                 status, label(chromeLockExplanation(locks)), label(curboxStatus()), label(playAccessSummary()))
         )
@@ -390,6 +397,7 @@ class MainActivity : Activity() {
         val presets = HorizontalScrollView(this).apply { addView(presetRow) }
 
         screen(
+            UiStyle.eyebrow(this, "YOUR DASHBOARD"),
             label("Install Lock", 26f),
             label(unlockStatus()),
             button("Why apps are locked") { goTo { showLockReasons() } },
@@ -448,7 +456,7 @@ class MainActivity : Activity() {
                 },
                 button(if (Store.hasPassword(this, Store.Pw.APP_LOCK)) "Change app-lock password" else "Set app-lock password") {
                     configureAppLockPassword()
-                }),
+                }, button("About & licenses") { goTo { showAbout() } }),
             section("Protection status", "Current app and browser protection",
                 label(chromeLockExplanation(locks)),
                 label("Chrome whitelist: " + if (Store.chromeLock(this)) "ON" else "OFF"),
@@ -489,7 +497,7 @@ class MainActivity : Activity() {
                 if (hits.isEmpty()) {
                     commit()
                 } else {
-                    AlertDialog.Builder(this)
+                    MaterialAlertDialogBuilder(this)
                         .setMessage("These installed apps match and will be uninstalled, with their data:\n\n" +
                                 hits.joinToString("\n"))
                         .setPositiveButton("Uninstall and block") { _, _ -> commit() }
@@ -564,7 +572,7 @@ class MainActivity : Activity() {
         list.adapter = object : ArrayAdapter<Pair<String, String>>(this, android.R.layout.simple_list_item_1, apps) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val (pkg, name) = getItem(position)!!
-                return Switch(this@MainActivity).apply {
+                return SwitchMaterial(this@MainActivity).apply {
                     text = name
                     textSize = 16f
                     setPadding(dp(8), dp(16), dp(8), dp(16))
@@ -764,16 +772,16 @@ class MainActivity : Activity() {
             Store.Pw.APP_LOCK -> "app-lock password"
         }
         val pw = passwordField(passwordName.replaceFirstChar { it.uppercase() })
-        val msg = label("").apply { setTextColor(Color.RED) }
+        val msg = errorLabel()
         screen(
             label(title, 22f),
             label("Enter the $passwordName."),
             pw, msg,
-            button("Confirm") {
+            primaryButton("Confirm") {
                 val password = pw.text.toString()
                 if (password.isBlank()) {
                     msg.text = "Enter password"
-                    return@button
+                    return@primaryButton
                 }
                 val wait = Store.lockoutRemainingMs(this, which)
                 if (wait > 0) {
@@ -914,7 +922,7 @@ class MainActivity : Activity() {
         list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rows)
         list.setOnItemClickListener { _, _, i, _ ->
             val site = sites[i]
-            AlertDialog.Builder(this)
+            MaterialAlertDialogBuilder(this)
                 .setMessage("Remove ${site.pattern} from the whitelist?")
                 .setPositiveButton("Remove") { _, _ ->
                     Store.removeSite(this, site.pattern)
@@ -1066,7 +1074,7 @@ class MainActivity : Activity() {
                 " — removal at ${timeLabel(site.removeAt)}" else " — locked"
             views.add(button(title) {
                 if (site.removeAt != null) {
-                    AlertDialog.Builder(this)
+                    MaterialAlertDialogBuilder(this)
                         .setTitle(site.domain)
                         .setMessage("This site stays locked until ${timeLabel(site.removeAt)}. Cancel its removal to keep it locked?")
                         .setPositiveButton("Keep locked") { _, _ ->
@@ -1076,7 +1084,7 @@ class MainActivity : Activity() {
                         }
                         .setNegativeButton("Back", null).show()
                 } else {
-                    AlertDialog.Builder(this)
+                    MaterialAlertDialogBuilder(this)
                         .setTitle("Remove ${site.domain}?")
                         .setMessage("It stays locked for 45 minutes after you request removal, then is removed automatically. " +
                                 "You can cancel the removal while you wait.")
@@ -1129,7 +1137,7 @@ class MainActivity : Activity() {
             setSingleLine(true)
         }
         val position = positionField(1)
-        val msg = label("").apply { setTextColor(Color.RED) }
+        val msg = errorLabel()
         val tester = EditText(this).apply {
             hint = "Domain or URL to test, e.g. manga.org"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
@@ -1146,7 +1154,7 @@ class MainActivity : Activity() {
                 label("Action"), action, label("Match type"), type, value,
                 label("Contains checks the hostname only. Suffix .org includes all .org domains; " +
                         "example.org includes that domain and its subdomains. Exact matches only the named domain."),
-                label("Position (1 runs first; choose 1 to ${rules.size + 1})"), position, msg, button("Add rule") {
+                label("Position (1 runs first; choose 1 to ${rules.size + 1})"), position, msg, primaryButton("Add rule") {
                     val selectedAction = DomainAction.entries[action.selectedItemPosition]
                     val selectedType = DomainMatchType.entries[type.selectedItemPosition]
                     val normalized = DomainRules.normalizeValue(selectedType, value.text.toString())
@@ -1176,7 +1184,7 @@ class MainActivity : Activity() {
             val controls = mutableListOf<View>(label(rule.description),
                 button("Change position (filter password)") {
                     val field = positionField(index + 1)
-                    val dialog = AlertDialog.Builder(this).setTitle("Position for ${rule.value}")
+                    val dialog = MaterialAlertDialogBuilder(this).setTitle("Position for ${rule.value}")
                         .setMessage("Choose 1 to ${rules.size}. Position 1 runs first.").setView(field)
                         .setPositiveButton("Move", null).setNegativeButton("Cancel", null).create()
                     dialog.setOnShowListener {
@@ -1245,7 +1253,7 @@ class MainActivity : Activity() {
         val manageWord = button("Manage selected word") {
             val entry = entries.getOrNull(list.selectedItemPosition) ?: return@button
             if (entry.removeAt != null) {
-                AlertDialog.Builder(this)
+                MaterialAlertDialogBuilder(this)
                     .setTitle(entry.word)
                     .setMessage("This word remains blocked until ${timeLabel(entry.removeAt)}. Cancel its removal to keep it blocked?")
                     .setPositiveButton("Keep blocked") { _, _ ->
@@ -1255,7 +1263,7 @@ class MainActivity : Activity() {
                     }
                     .setNegativeButton("Back", null).show()
             } else {
-                AlertDialog.Builder(this)
+                MaterialAlertDialogBuilder(this)
                     .setTitle("Remove ${entry.word}?")
                     .setMessage("It will remain blocked for $wait minutes, then be removed automatically. " +
                             "You can cancel the removal while you wait.")
@@ -1271,7 +1279,7 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT
         }
         val msg = label("")
-        val add = button("Block word immediately") {
+        val add = primaryButton("Block word immediately") {
             val word = KeywordMatcher.normalizeWord(field.text.toString())
             if (word == null) {
                 msg.text = "Use 1-80 characters: letters, numbers, spaces, apostrophes or hyphens."
@@ -1603,7 +1611,7 @@ class MainActivity : Activity() {
                         "Keyword removal requests keep their scheduled deadlines; their delay setting applies to new requests."))
         )
         views.add(msg)
-        views.add(button("Save settings") {
+        views.add(primaryButton("Save settings") {
             if (settingsAuthed) {
                 val values = fields.mapValues { it.value.text.toString().trim().toIntOrNull() }
                 val invalid = values.entries.firstOrNull { (option, value) ->
@@ -1678,6 +1686,15 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun showAbout() {
+        screen(label("About Install Lock", 22f),
+            label("Device protection, app locks and website rules in one place."),
+            label("Visual design inspired by Curbox: Material 3 surfaces, rounded cards and Inter typography."),
+            section("Inter font license", "The Inter Project Authors · SIL Open Font License 1.1",
+                label(assets.open("licenses/Inter-OFL.txt").bufferedReader().use { it.readText() }, 13f)),
+            button("Back") { back() })
+    }
+
     // ---------- UI helpers ----------
 
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
@@ -1702,9 +1719,22 @@ class MainActivity : Activity() {
     /** Shows [content] padded so it stays clear of the status bar, navigation bar,
      *  camera cutout and keyboard. */
     private fun show(content: View) {
+        UiStyle.styleInputs(content)
         val root = FrameLayout(this)
+        root.setBackgroundColor(UiStyle.color(this, com.google.android.material.R.attr.colorSurface))
+        val frame = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (history.isNotEmpty()) {
+            val toolbar = LinearLayout(this).apply {
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(dp(8), 0, dp(20), 0)
+                addView(UiStyle.backButton(this@MainActivity) { back() }, LinearLayout.LayoutParams(dp(48), dp(48)))
+                addView(UiStyle.label(this@MainActivity, "Install Lock", 14f))
+            }
+            frame.addView(toolbar, LinearLayout.LayoutParams(-1, dp(56)))
+        }
+        frame.addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(
-            content,
+            frame,
             FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT
@@ -1725,22 +1755,26 @@ class MainActivity : Activity() {
     private fun screen(vararg views: View) {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(24), dp(16), dp(24), dp(24))
+        col.setPadding(dp(20), dp(20), dp(20), dp(32))
         views.forEach { col.addView(it, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }) }
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = dp(if (it is ExpandableSection) 16 else 8)
+            }) }
         val scroll = ScrollView(this)
         scroll.isFillViewport = true
         scroll.addView(col)
         show(scroll)
     }
 
-    private fun label(t: String, size: Float = 16f): TextView {
-        val v = TextView(this)
-        v.text = t
-        v.textSize = size
-        v.setPadding(0, dp(8), 0, dp(8))
-        return v
+    private fun label(t: String, size: Float = 16f): TextView = UiStyle.label(this, t, size)
+
+    private fun errorLabel() = label("").apply {
+        setTextColor(UiStyle.color(this@MainActivity, androidx.appcompat.R.attr.colorError))
+        accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
     }
+
+    private fun primaryButton(t: String, onClick: () -> Unit): Button =
+        UiStyle.button(this, t, primary = true, onClick = onClick)
 
     private fun passwordField(hintText: String): EditText {
         val v = EditText(this)
@@ -1750,11 +1784,6 @@ class MainActivity : Activity() {
     }
 
     private fun button(t: String, onClick: () -> Unit): Button {
-        val b = Button(this)
-        b.text = t
-        b.isAllCaps = false
-        b.minHeight = dp(48)
-        b.setOnClickListener { onClick() }
-        return b
+        return UiStyle.button(this, t, onClick = onClick)
     }
 }

@@ -1,6 +1,7 @@
 package com.example.installlock
 
-import android.app.Activity
+import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.color.DynamicColors
 import android.app.SearchManager
 import android.content.ActivityNotFoundException
 import android.content.Context
@@ -10,15 +11,13 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.TextView
 import android.window.OnBackInvokedDispatcher
 
 /** A place to edit the next search without reopening the still-blocked Google results. */
-class GoogleSearchRecoveryActivity : Activity() {
+class GoogleSearchRecoveryActivity : AppCompatActivity() {
     companion object {
         private const val BLOCKED_WORD = "blocked_word"
         private const val ORIGINAL_QUERY = "original_query"
@@ -38,6 +37,7 @@ class GoogleSearchRecoveryActivity : Activity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         window.setDecorFitsSystemWindows(false)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -65,7 +65,10 @@ class GoogleSearchRecoveryActivity : Activity() {
             setText(intent.getStringExtra(ORIGINAL_QUERY).orEmpty())
             setSelection(text.length)
         }
-        val message = TextView(this)
+        val message = UiStyle.label(this, "").apply {
+            setTextColor(UiStyle.color(this@GoogleSearchRecoveryActivity, androidx.appcompat.R.attr.colorError))
+            accessibilityLiveRegion = android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE
+        }
         fun search(excludeTrigger: Boolean = false) {
             val entered = query.text.toString().trim()
             val text = if (excludeTrigger && word != null) GoogleSearchQuery.excluding(entered, word).orEmpty() else entered
@@ -105,37 +108,30 @@ class GoogleSearchRecoveryActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             val padding = (24 * resources.displayMetrics.density).toInt()
             setPadding(padding, padding, padding, padding)
-            addView(TextView(this@GoogleSearchRecoveryActivity).apply {
-                text = if (word == null) "New Google search" else "Google result blocked"
-                textSize = 24f
-            })
-            addView(TextView(this@GoogleSearchRecoveryActivity).apply {
-                text = if (word == null) "Enter a new Google search. Your current app locks and filter settings still apply."
+            addView(UiStyle.eyebrow(this@GoogleSearchRecoveryActivity, "GOOGLE SEARCH"))
+            addView(UiStyle.label(this@GoogleSearchRecoveryActivity,
+                if (word == null) "New Google search" else "Google result blocked", 26f))
+            val explanation = UiStyle.label(this@GoogleSearchRecoveryActivity,
+                if (word == null) "Enter a new Google search. Your current app locks and filter settings still apply."
                     else "The results contain the blocked word \"$word\". " +
                             "Edit your search below, or retry it with that word excluded. " +
-                            "If your original query is missing, enter it below first. Results are still checked for blocked words."
-                textSize = 16f
-            })
-            addView(query)
-            addView(message)
-            if (word != null) addView(Button(this@GoogleSearchRecoveryActivity).apply {
-                text = "Search without \"$word\""
-                setOnClickListener { search(excludeTrigger = true) }
-            })
-            addView(Button(this@GoogleSearchRecoveryActivity).apply {
-                text = "Search Google"
-                setOnClickListener { search() }
-            })
-            addView(Button(this@GoogleSearchRecoveryActivity).apply {
-                text = "Turn on Google VPN"
-                setOnClickListener { message.text = Policy.enableGoogleFilter(this@GoogleSearchRecoveryActivity) }
-            })
-            addView(Button(this@GoogleSearchRecoveryActivity).apply {
-                text = "Home"
-                setOnClickListener { goHome() }
-            })
+                            "If your original query is missing, enter it below first. Results are still checked for blocked words.")
+            val form = UiStyle.card(this@GoogleSearchRecoveryActivity, explanation, query, message)
+            if (word != null) form.addView(UiStyle.button(this@GoogleSearchRecoveryActivity,
+                "Search without \"$word\"", primary = true) { search(excludeTrigger = true) }, LinearLayout.LayoutParams(-1, -2))
+            form.addView(UiStyle.button(this@GoogleSearchRecoveryActivity, "Search Google", primary = word == null) {
+                search()
+            }, LinearLayout.LayoutParams(-1, -2))
+            addView(form, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = padding })
+            addView(UiStyle.button(this@GoogleSearchRecoveryActivity, "Turn on Google VPN") {
+                message.text = Policy.enableGoogleFilter(this@GoogleSearchRecoveryActivity)
+            }, LinearLayout.LayoutParams(-1, -2))
+            addView(UiStyle.button(this@GoogleSearchRecoveryActivity, "Home") { goHome() }, LinearLayout.LayoutParams(-1, -2))
         }
+        UiStyle.styleInputs(column)
         val scroll = ScrollView(this).apply { addView(column) }
+        scroll.isVerticalScrollBarEnabled = false
+        scroll.setBackgroundColor(UiStyle.color(this, com.google.android.material.R.attr.colorSurface))
         scroll.setOnApplyWindowInsetsListener { view, insets ->
             val bars = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             val keyboard = insets.getInsets(WindowInsets.Type.ime())

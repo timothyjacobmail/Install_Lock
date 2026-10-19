@@ -1,0 +1,23 @@
+<resources>
+    <color name="il_primary">#83D5C5</color>
+    <color name="il_on_primary">#003730</color>
+    <color name="il_primary_container">#005046</color>
+    <color name="il_on_primary_container">#9FF2E1</color>
+    <color name="il_secondary">#B1CCC5</color>
+    <color name="il_secondary_container">#334B46</color>
+    <color name="il_on_secondary_container">#CDE8E1</color>
+    <color name="il_tertiary">#ACCAE5</color>
+    <color name="il_tertiary_container">#2C4A60</color>
+    <color name="il_on_tertiary_container">#CAE6FF</color>
+    <color name="il_surface">#0E1513</color>
+    <color name="il_on_surface">#DEE4E1</color>
+    <color name="il_container">#1B211F</color>
+    <color name="il_container_low">#171D1B</color>
+    <color name="il_container_high">#252B2A</color>
+    <color name="il_surface_variant">#3F4946</color>
+    <color name="il_on_surface_variant">#BEC9C5</color>
+    <color name="il_outline">#899390</color>
+    <color name="il_outline_variant">#3F4946</color>
+    <color name="il_error">#FFB4AB</color>
+    <bool name="il_light_system_bars">false</bool>
+</resources>
