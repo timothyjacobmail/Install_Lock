@@ -226,6 +226,56 @@ object Store {
     fun setChromeLock(c: Context, on: Boolean) =
         p(c).edit().putBoolean("chromeLock", on).apply()
 
+    // ---------- extra locked sites (instant addition, fixed 45-minute removal wait) ----------
+
+    data class ExtraLockedSite(val domain: String, val removeAt: Long?)
+
+    private fun readExtraSiteLocks(c: Context): ExtraSiteLocks {
+        val prefs = p(c)
+        val removals = prefs.getStringSet("extraSiteRemovalRequests", emptySet())!!.mapNotNull { raw ->
+            val split = raw.indexOf('|')
+            val deadline = if (split > 0) raw.substring(0, split).toLongOrNull() else null
+            if (deadline == null) null else raw.substring(split + 1) to deadline
+        }.toMap()
+        return ExtraSiteLocks(prefs.getStringSet("extraLockedSites", emptySet())!!.toSet(), removals)
+    }
+
+    private fun saveExtraSiteLocks(c: Context, locks: ExtraSiteLocks) {
+        p(c).edit().putStringSet("extraLockedSites", locks.domains)
+            .putStringSet("extraSiteRemovalRequests", locks.removals.map { (domain, time) -> "$time|$domain" }.toSet())
+            .apply()
+    }
+
+    @Synchronized
+    fun extraLockedSites(c: Context): List<ExtraLockedSite> {
+        val saved = readExtraSiteLocks(c)
+        val current = saved.expire(System.currentTimeMillis())
+        if (current != saved) saveExtraSiteLocks(c, current)
+        return current.domains.sorted().map { ExtraLockedSite(it, current.removals[it]) }
+    }
+
+    /** Full URLs are accepted, but the lock always covers the whole domain and its subdomains. */
+    fun normalizeExtraSite(input: String): String? =
+        SharedSite.domainFromText(input)?.let { normalizeSite(it) }
+
+    @Synchronized
+    fun addExtraLockedSite(c: Context, input: String): Boolean {
+        val domain = normalizeExtraSite(input) ?: return false
+        val saved = readExtraSiteLocks(c)
+        val current = saved.expire(System.currentTimeMillis())
+        val updated = current.add(domain, System.currentTimeMillis())
+        if (updated != saved) saveExtraSiteLocks(c, updated)
+        return updated != current
+    }
+
+    @Synchronized
+    fun requestExtraSiteRemoval(c: Context, domain: String): Long? {
+        val saved = readExtraSiteLocks(c)
+        val updated = saved.requestRemoval(domain, System.currentTimeMillis())
+        if (updated != saved) saveExtraSiteLocks(c, updated)
+        return updated.removals[domain]
+    }
+
     // ---------- browser keyword filter ----------
 
     data class BrowserKeyword(val word: String, val removeAt: Long?)

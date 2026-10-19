@@ -52,4 +52,28 @@ class ChromeRestrictionsTest {
         val current = ChromeRestrictions.update(Bundle(), true, listOf("b.example", "a.example"))!!
         assertNull(ChromeRestrictions.update(current, true, listOf("a.example", "b.example")))
     }
+
+    @Test
+    fun extraSitesRemainBlockedWhenWhitelistIsTurnedOff() {
+        val current = ChromeRestrictions.update(Bundle(), true, listOf("example.com"), listOf("blocked.com"))!!
+        val off = ChromeRestrictions.update(current, false, listOf("example.com"), listOf("blocked.com"))!!
+        assertEquals("[\"blocked.com\"]", off.getString("URLBlocklist"))
+        assertFalse(off.containsKey("URLAllowlist"))
+        assertNull(ChromeRestrictions.update(off, false, emptyList(), listOf("blocked.com")))
+        val removed = ChromeRestrictions.update(off, false, emptyList(), emptyList())!!
+        assertFalse(removed.containsKey("URLBlocklist"))
+        assertFalse(removed.containsKey("URLAllowlist"))
+    }
+
+    @Test
+    fun extraBlocksOverrideWhitelistWithoutDeletingSavedAllowEntries() {
+        val whitelist = listOf("example.com", "sub.example.com/path", "other.com")
+        val blocked = ChromeRestrictions.update(Bundle(), true, whitelist, listOf("example.com"))!!
+        assertEquals("[\"*\",\"example.com\"]", blocked.getString("URLBlocklist"))
+        assertEquals("[\"other.com\"]", blocked.getString("URLAllowlist"))
+        val removed = ChromeRestrictions.update(blocked, true, whitelist, emptyList())!!
+        assertEquals(whitelist.sorted(), JSONArray(removed.getString("URLAllowlist")).let { array ->
+            (0 until array.length()).map { array.getString(it) }
+        })
+    }
 }

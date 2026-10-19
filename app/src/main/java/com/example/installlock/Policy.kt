@@ -82,7 +82,7 @@ object Policy {
         val previousKeywordGuard = Store.keywordGuardPackages(c)
         val accessibilityEnabled = BrowserKeywordService.isEnabled(c)
         val keywordBrowsers = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
-            BrowserPackages.discover(c) + previousKeywordGuard else emptySet()
+            BrowserPackages.keywordTargets(c) + previousKeywordGuard else emptySet()
         val keywordReleaseRetries = mutableSetOf<String>()
         val neverRules = Store.neverInstall(c)
         val statuses = mutableListOf<AppLockStatus>()
@@ -122,7 +122,7 @@ object Policy {
             val isBrowser = name in browsers
             val isGuarded = guardOn && name in CURBOX_GUARDED
             val keywordPaused = name in keywordBrowsers
-            // Previously guarded system browsers must also be processed so they can be resumed.
+            // Previously guarded system apps must also be processed so they can be resumed.
             if (isSystem && !isProtected && !isBrowser && !isGuarded &&
                 !keywordPaused && name !in previousKeywordGuard) {
                 // Read status without changing policy for unrelated system apps.
@@ -217,7 +217,8 @@ object Policy {
             val manager = dpm(c)
             val owner = admin(c)
             val current = manager.getApplicationRestrictions(owner, CHROME)
-            val updated = ChromeRestrictions.update(current, Store.chromeLock(c), Store.activePatterns(c))
+            val updated = ChromeRestrictions.update(current, Store.chromeLock(c), Store.activePatterns(c),
+                Store.extraLockedSites(c).map { it.domain })
             if (updated == null && !force) return
             manager.setApplicationRestrictions(owner, CHROME, updated ?: Bundle(current))
             if (RESTART_CHROME_ON_CHANGE) bounceChrome(c)
@@ -271,7 +272,7 @@ object Policy {
         if (!isOwner(c) || packages.isEmpty()) return
         try {
             val keywordGuard = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
-                BrowserPackages.discover(c) + Store.keywordGuardPackages(c) else emptySet()
+                BrowserPackages.keywordTargets(c) + Store.keywordGuardPackages(c) else emptySet()
             val releasable = packages.filter { it !in keywordGuard }
             if (releasable.isNotEmpty()) dpm(c).setPackagesSuspended(admin(c), releasable.toTypedArray(), false)
         } catch (_: Exception) { }

@@ -9,8 +9,9 @@ internal object ChromeRestrictions {
 
     /** Null means Android already holds the requested policy. Preserve unrelated restrictions. */
     @Suppress("DEPRECATION")
-    fun update(current: Bundle, lockOn: Boolean, activePatterns: List<String>): Bundle? {
-        if (!lockOn) {
+    fun update(current: Bundle, lockOn: Boolean, activePatterns: List<String>,
+               extraLockedDomains: List<String> = emptyList()): Bundle? {
+        if (!lockOn && extraLockedDomains.isEmpty()) {
             if (!current.containsKey(BLOCKLIST) && !current.containsKey(ALLOWLIST)) return null
             return Bundle(current).apply {
                 remove(BLOCKLIST)
@@ -19,12 +20,14 @@ internal object ChromeRestrictions {
         }
 
         // Chrome's Android managed configuration declares these lists as JSON strings.
-        val blocked = JSONArray(listOf("*")).toString()
-        val allowed = JSONArray(activePatterns.sorted()).toString()
-        if (current[BLOCKLIST] == blocked && current[ALLOWLIST] == allowed) return null
+        val extras = ExtraSiteLocks(extraLockedDomains.toSet())
+        val blocked = JSONArray((if (lockOn) listOf("*") else emptyList()) + extras.domains.sorted()).toString()
+        val allowed = if (lockOn) JSONArray(extras.allowedPatterns(activePatterns).sorted()).toString() else null
+        if (current[BLOCKLIST] == blocked && current[ALLOWLIST] == allowed &&
+            (lockOn || !current.containsKey(ALLOWLIST))) return null
         return Bundle(current).apply {
             putString(BLOCKLIST, blocked)
-            putString(ALLOWLIST, allowed)
+            if (allowed != null) putString(ALLOWLIST, allowed) else remove(ALLOWLIST)
         }
     }
 }

@@ -74,13 +74,20 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             },
             button("App locks") { goTo { showAppPicker() } },
-            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
-            button("Chrome whitelist") { goTo { showChromeSites() } }
+            button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
+            button("Chrome whitelist") { goTo { showChromeSites() } },
+            button("Extra locked sites") { goTo { showExtraLockedSites() } }
         )
         if (Store.chromeLock(this)) views.add(label(
             "Chrome website restriction: only active whitelist entries can open. " +
                     "A site that is missing or still waiting will be blocked even when Chrome itself is unlocked. " +
                     "Open Chrome whitelist to see each site's activation time."
+        ))
+        val extraSites = Store.extraLockedSites(this)
+        if (extraSites.isNotEmpty()) views.add(label(
+            "Chrome extra site locks: ${extraSites.joinToString { it.domain }}. " +
+                    "These override whitelist entries and remain active until their removal wait ends. " +
+                    "Open Extra locked sites to see removal deadlines."
         ))
         if (statuses.none { it.needsAttention }) views.add(label("No app is currently locked by Install Lock."))
         for (status in statuses) {
@@ -295,8 +302,9 @@ class MainActivity : Activity() {
                 }
             },
             button("Chrome whitelist") { goTo { showChromeSites() } },
+            button("Extra locked sites") { goTo { showExtraLockedSites() } },
             button("App locks") { goTo { showAppPicker() } },
-            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
+            button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
             button("Settings") { openSettings() },
             status,
             button("Lock protected apps now") {
@@ -333,6 +341,7 @@ class MainActivity : Activity() {
             label("Install Lock is active", 22f),
             label(chromeLockExplanation(locks)),
             button("Why apps are locked") { goTo { showLockReasons() } },
+            button("Extra locked sites") { goTo { showExtraLockedSites() } },
             label("New apps are suspended for ${timings[TimingOption.INSTALL_WAIT]} minutes after install."),
             label(unlockStatus()),
             label("Chrome lock: " + (if (Store.chromeLock(this)) "ON (whitelist only)" else "off")),
@@ -357,7 +366,7 @@ class MainActivity : Activity() {
                 reopen()
             },
             button("App locks") { goTo { showAppPicker() } },
-            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
+            button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
             button("Never-install list") { goTo { showNeverInstall() } },
             button("Google app filter") { goTo { showGoogleFilter() } },
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
@@ -805,10 +814,11 @@ class MainActivity : Activity() {
 
         val info = if (lockOn) {
             val b = Policy.otherBrowsers(this)
-            "Chrome only opens ✓ sites. " +
+            "Chrome only opens ✓ sites, except those covered by Extra locked sites. " +
                     (if (b.isEmpty()) "No other browsers found." else "Other browsers suspended: ${b.joinToString()}")
         } else {
-            "Chrome lock is off, so Chrome is unrestricted. Sites you add still start their $siteWait-minute wait."
+            "Chrome whitelist is off. Extra locked sites still apply. " +
+                    "Whitelist sites you add still start their $siteWait-minute wait."
         }
 
         val lockBtn = button(if (lockOn) "Turn Chrome lock OFF (filter password)" else "Turn Chrome lock ON") {
@@ -838,6 +848,7 @@ class MainActivity : Activity() {
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
         col.addView(label("Chrome whitelist", 22f))
         col.addView(label(info))
+        col.addView(button("Extra locked sites") { goTo { showExtraLockedSites() } })
         col.addView(lockBtn)
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         col.addView(add)
@@ -874,6 +885,71 @@ class MainActivity : Activity() {
             },
             button("Done") { back() }
         )
+    }
+
+    // ---------- extra locked sites ----------
+
+    private fun showExtraLockedSites() {
+        Policy.syncChrome(this)
+        val sites = Store.extraLockedSites(this)
+        fun timeLabel(time: Long) = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(time))
+        val field = EditText(this).apply {
+            hint = "example.com or a website URL"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val msg = label("")
+        val views = mutableListOf<View>(
+            label("Extra locked sites", 22f),
+            label("Adding a site blocks its whole domain and subdomains in Chrome immediately, without a password. " +
+                    "These locks override the whitelist and stay on even when the whitelist is off. " +
+                    "Removing a site takes a fixed 45 minutes; this wait cannot be changed in Settings. " +
+                    "Whitelist rules, keyword filtering and app locks can still restrict access afterward."),
+            field, msg,
+            button("Lock site immediately") {
+                val domain = Store.normalizeExtraSite(field.text.toString())
+                when {
+                    domain == null -> msg.text = "Enter a specific site, such as example.com."
+                    !Store.addExtraLockedSite(this, domain) -> msg.text = "$domain is already locked."
+                    else -> {
+                        Policy.syncChrome(this)
+                        toast("Locked $domain. Any pending removal was cancelled.")
+                        reopen()
+                    }
+                }
+            },
+            button("Refresh") { reopen() }
+        )
+        if (sites.isEmpty()) views.add(label("No extra sites are locked."))
+        for (site in sites) {
+            val title = site.domain + if (site.removeAt != null)
+                " — removal at ${timeLabel(site.removeAt)}" else " — locked"
+            views.add(button(title) {
+                if (site.removeAt != null) {
+                    AlertDialog.Builder(this)
+                        .setTitle(site.domain)
+                        .setMessage("This site stays locked until ${timeLabel(site.removeAt)}. Cancel its removal to keep it locked?")
+                        .setPositiveButton("Keep locked") { _, _ ->
+                            Store.addExtraLockedSite(this, site.domain)
+                            Policy.syncChrome(this)
+                            reopen()
+                        }
+                        .setNegativeButton("Back", null).show()
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("Remove ${site.domain}?")
+                        .setMessage("It stays locked for 45 minutes after you request removal, then is removed automatically. " +
+                                "You can cancel the removal while you wait.")
+                        .setPositiveButton("Start 45-minute wait") { _, _ ->
+                            Store.requestExtraSiteRemoval(this, site.domain)
+                            Policy.syncChrome(this)
+                            reopen()
+                        }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            })
+        }
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
     }
 
     // ---------- browser keyword filter ----------
@@ -934,10 +1010,10 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
         }
-        col.addView(label("Browser keyword filter", 22f))
+        col.addView(label("Browser & Google keyword filter", 22f))
         col.addView(label(when {
             !filterOn -> "Keyword filter: OFF (disabled with filter password)."
-            !ready -> "Keyword filter: ON. Browsers are blocked until the accessibility service is running."
+            !ready -> "Keyword filter: ON. Browsers and the Google app are blocked until the accessibility service is running."
             else -> "Keyword filter: ON. Accessibility service is running."
         }))
         col.addView(label("Accessibility service: " + if (enabled) "enabled" else "OFF — enable it below"))
@@ -959,15 +1035,20 @@ class MainActivity : Activity() {
                 reopen()
             }
         })
-        col.addView(label("Checks visible webpage text, including search results, for whole words or phrases " +
-                "regardless of case. Typed fields are ignored. Tries the browser's current-tab close action; " +
-                "otherwise returns Home. Browser support depends on readable accessibility content. " +
-                "Page text stays on this device and is not saved."))
+        col.addView(label("Checks visible browser webpages and Google app content, including search results and Discover, " +
+                "for whole words or phrases regardless of case. Both use the same blocked-word list. " +
+                "Typed fields are ignored. A match in Google opens a blocked-results screen where you can enter a new search. " +
+                "In browsers, it tries the current-tab close action; " +
+                "otherwise returns Home. Detection depends on readable accessibility content. " +
+                "Inspected text stays on this device and is not saved."))
+        col.addView(button("Start a new Google search") {
+            startActivity(GoogleSearchRecoveryActivity.openIntent(this))
+        })
         col.addView(button("Open Android accessibility settings") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-        col.addView(label("Enable “Install Lock browser keyword filter”. If Android turns the service off, " +
-                "browser access is blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
+        col.addView(label("Enable “${getString(R.string.browser_keyword_service_name)}”. If Android turns the service off, " +
+                "browsers and the Google app are blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
                 "above to turn keyword protection off. Other app locks and Chrome whitelist rules still apply. " +
                 "Tap a word to request removal ($wait-minute wait); tap a pending removal to cancel it."))
         col.addView(field)

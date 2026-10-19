@@ -19,11 +19,11 @@ data class AppLockReasons(
     fun descriptions(): List<String> = buildList {
         if (keywordServiceMissing) add(
             if (accessibilityEnabled)
-                "The browser keyword accessibility service is enabled but has not connected. " +
+                "The browser and Google keyword accessibility service is enabled but has not connected. " +
                         "Wait for it to connect, or re-enable it in Android Accessibility settings."
             else
-                "The browser keyword accessibility setting is disabled. " +
-                        "Enable Install Lock's browser keyword service in Android Accessibility settings."
+                "The browser and Google keyword accessibility setting is disabled. " +
+                        "Enable Install Lock's browser and Google keyword service in Android Accessibility settings."
         )
         if (appLock) add("This app is selected in App locks and has no active temporary unlock. " +
                 "Use the app-lock password to unlock it temporarily or remove its app lock.")

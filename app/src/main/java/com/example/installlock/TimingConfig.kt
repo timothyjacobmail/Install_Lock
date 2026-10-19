@@ -6,7 +6,7 @@ enum class TimingOption(
 ) {
     INSTALL_WAIT("New-app install delay", "minutes", 15, 0, 10080, 60_000),
     SITE_WAIT("Chrome whitelist wait", "minutes", 15, 0, 10080, 60_000),
-    KEYWORD_REMOVAL_WAIT("Browser keyword removal wait (new requests)", "minutes", 15, 1, 10080, 60_000),
+    KEYWORD_REMOVAL_WAIT("Browser and Google keyword removal wait (new requests)", "minutes", 15, 1, 10080, 60_000),
     DEFAULT_UNLOCK("Default unlock duration", "minutes", 30, 1, 10080, 60_000),
     MAX_UNLOCK("Maximum unlock duration", "minutes", 120, 1, 10080, 60_000),
     CURBOX_GRACE("Curbox guard grace period", "seconds", 15, 0, 3600, 1000),

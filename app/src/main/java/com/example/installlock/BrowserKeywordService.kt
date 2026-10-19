@@ -15,11 +15,11 @@ import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 
-/** Reads browser page text locally. Never captures screenshots, typed fields, or browsing logs. */
+/** Reads browser pages and visible Google app content locally; never saves the inspected text. */
 @Suppress("DEPRECATION")
 class BrowserKeywordService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
-    private var browsers = setOf(Policy.CHROME)
+    private var targets = setOf(Policy.CHROME, BrowserPackages.GOOGLE_APP)
     private var scanScheduled = false
     private var handlingMatch = false
     private var registered = false
@@ -34,12 +34,12 @@ class BrowserKeywordService : AccessibilityService() {
         }
     }
     private val packageReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) { refreshBrowsers() }
+        override fun onReceive(context: Context, intent: Intent) { refreshTargets() }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        refreshBrowsers()
+        refreshTargets()
         prefs.registerOnSharedPreferenceChangeListener(preferenceListener)
         if (!registered) {
             val filter = IntentFilter().apply {
@@ -58,15 +58,15 @@ class BrowserKeywordService : AccessibilityService() {
         scheduleScan(0)
     }
 
-    private fun refreshBrowsers() {
+    private fun refreshTargets() {
         // Some Android versions hide suspended handlers from intent queries. Keep their targets
         // registered before the guard releases them as this service reconnects.
-        browsers = BrowserPackages.discover(this) + Store.keywordGuardPackages(this)
-        serviceInfo = serviceInfo.apply { packageNames = browsers.toTypedArray() }
+        targets = BrowserPackages.keywordTargets(this) + Store.keywordGuardPackages(this)
+        serviceInfo = serviceInfo.apply { packageNames = targets.toTypedArray() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.packageName?.toString() in browsers) scheduleScan(0)
+        if (event?.packageName?.toString() in targets) scheduleScan(0)
     }
 
     private fun scheduleScan(delay: Long) {
@@ -85,7 +85,7 @@ class BrowserKeywordService : AccessibilityService() {
         val root = rootInActiveWindow ?: return
         try {
             val browser = root.packageName?.toString() ?: return
-            if (browser !in browsers) return
+            if (browser !in targets) return
             val words = Store.browserKeywords(this)
             if (words != lastWords) {
                 lastWords = words
@@ -93,7 +93,12 @@ class BrowserKeywordService : AccessibilityService() {
             }
             val text = visiblePageText(root)
             val match = matcher.findMatch(text)
-            if (match != null) closeTabOrLeave(root, browser, match)
+            if (match != null) {
+                // Home leaves Google's blocked results open, causing a loop on re-entry.
+                // Offer a separate search editor that can replace those results instead.
+                if (browser == BrowserPackages.GOOGLE_APP) recoverGoogleSearch(match)
+                else closeTabOrLeave(root, browser, match)
+            }
             else scheduleScan(500)
         } catch (_: RuntimeException) {
             // A browser may replace its accessibility tree during navigation.
@@ -106,7 +111,7 @@ class BrowserKeywordService : AccessibilityService() {
         var visited = 0
         fun walk(node: AccessibilityNodeInfo, insidePage: Boolean, depth: Int) {
             if (depth > 64 || ++visited > 4000 || text.length >= 131072) return
-            if (node.isPassword || node.isEditable) return
+            if (node.isPassword || node.isEditable || node.className?.toString() == "android.widget.EditText") return
             val className = node.className?.toString().orEmpty()
             val page = insidePage || className == "android.webkit.WebView" || className.endsWith("GeckoView")
             if (page && node.isVisibleToUser) {
@@ -121,7 +126,9 @@ class BrowserKeywordService : AccessibilityService() {
                 try { walk(child, page, depth + 1) } finally { child.recycle() }
             }
         }
-        walk(root, false, 0)
+        // Google also renders results and Discover cards as native views. Browser chrome
+        // remains excluded for other packages, so address bars and menus aren't scanned.
+        walk(root, root.packageName?.toString() == BrowserPackages.GOOGLE_APP, 0)
         return text.toString()
     }
 
@@ -151,9 +158,9 @@ class BrowserKeywordService : AccessibilityService() {
             val opened = try { tabs?.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK) == true }
                 finally { tabs?.recycle() }
             if (opened) handler.postDelayed({ tryCloseTab(browser, word, 0) }, 200)
-            else leaveBrowser(browser, word)
+            else leaveApp(browser, word)
         } catch (_: RuntimeException) {
-            leaveBrowser(browser, word)
+            leaveApp(browser, word)
         }
     }
 
@@ -183,7 +190,7 @@ class BrowserKeywordService : AccessibilityService() {
         } else if (stillBrowser && attempt < 4) {
             handler.postDelayed({ tryCloseTab(browser, word, attempt + 1) }, 200)
         } else {
-            leaveBrowser(browser, word)
+            leaveApp(browser, word)
         }
     }
 
@@ -194,12 +201,32 @@ class BrowserKeywordService : AccessibilityService() {
         return try { clickMenuItem(parent, depth + 1) } finally { parent.recycle() }
     }
 
-    private fun leaveBrowser(browser: String, word: String) {
+    private fun recoverGoogleSearch(word: String) {
+        handlingMatch = true
+        val root = rootInActiveWindow
+        try {
+            if (root?.packageName?.toString() == BrowserPackages.GOOGLE_APP) {
+                startActivity(GoogleSearchRecoveryActivity.openIntent(this, word))
+            }
+        } catch (_: RuntimeException) {
+            // The same search editor is also available from Install Lock if Android
+            // prevents an automatic launch. Never leave the blocked results readable.
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            Toast.makeText(this, "Keyword blocked. Open Install Lock to start a new Google search.", Toast.LENGTH_LONG).show()
+        } finally {
+            root?.recycle()
+            handlingMatch = false
+            scheduleScan(500)
+        }
+    }
+
+    private fun leaveApp(browser: String, word: String) {
         val root = rootInActiveWindow
         try {
             if (root?.packageName?.toString() == browser) {
                 performGlobalAction(GLOBAL_ACTION_HOME)
-                Toast.makeText(this, "Browser keyword blocked: $word", Toast.LENGTH_SHORT).show()
+                val app = if (browser == BrowserPackages.GOOGLE_APP) "Google app" else "Browser"
+                Toast.makeText(this, "$app keyword blocked: $word", Toast.LENGTH_SHORT).show()
             }
         } finally {
             root?.recycle()

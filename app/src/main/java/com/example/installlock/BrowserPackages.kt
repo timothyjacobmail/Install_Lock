@@ -6,7 +6,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 
 internal object BrowserPackages {
-    /** Use the same browser targets for page inspection and the missing-service guard. */
+    const val GOOGLE_APP = "com.google.android.googlequicksearchbox"
+
+    /** Scanning, suspension and release must cover the same apps, including native Google search. */
+    fun keywordTargets(context: Context): Set<String> = discover(context) + GOOGLE_APP
+
+    /** Installed browsers that can handle arbitrary web links. */
     fun discover(context: Context): Set<String> {
         val pm = context.packageManager
         val flags = PackageManager.MATCH_ALL or PackageManager.MATCH_DISABLED_COMPONENTS

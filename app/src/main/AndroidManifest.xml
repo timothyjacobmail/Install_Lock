@@ -28,6 +28,14 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".GoogleSearchRecoveryActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:noHistory="true"
+            android:windowSoftInputMode="adjustResize"
+            android:enableOnBackInvokedCallback="true" />
+
         <activity-alias
             android:name=".WhitelistShareActivity"
             android:targetActivity=".MainActivity"
