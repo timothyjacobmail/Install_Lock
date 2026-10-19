@@ -72,4 +72,43 @@ class KeywordExceptionStoreTest {
         assertTrue(Store.addBrowserKeyword(context, "anime"))
         assertNull(Store.keywordExceptions(context)["anime"])
     }
+
+    @Test
+    fun genericExceptionsRequireTheFilterPasswordAndPersistNormalizedWords() {
+        assertTrue(Store.genericKeywordExceptions(context).isEmpty())
+        assertFalse(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
+        Store.setPassword(context, "MainPass1", Store.Pw.MAIN)
+        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        assertFalse(Store.addGenericKeywordException(context, "christian", "MainPass1"))
+        assertFalse(Store.addGenericKeywordException(context, "bad|word", "FilterPass4"))
+        assertTrue(Store.addGenericKeywordException(context, " CHRISTIAN ", "FilterPass4"))
+        assertTrue(Store.addGenericKeywordException(context, " Bible   Study ", "FilterPass4"))
+        assertEquals(setOf("christian", "bible study"), Store.genericKeywordExceptions(context))
+        assertEquals(setOf("christian", "bible study"), prefs.getStringSet("genericKeywordExceptions", emptySet()))
+    }
+
+    @Test
+    fun genericExceptionsCanBeRemovedDuringPasswordLockoutButCannotBeAdded() {
+        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        assertTrue(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
+        repeat(5) { Store.checkPassword(context, "wrong", Store.Pw.FILTER) }
+        assertFalse(Store.addGenericKeywordException(context, "education", "FilterPass4"))
+        Store.removeGenericKeywordException(context, " CHRISTIAN ")
+        assertTrue(Store.genericKeywordExceptions(context).isEmpty())
+    }
+
+    @Test
+    fun genericRulesPreservePerWordRulesAndDeadlinesAndSurviveWordRemoval() {
+        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        assertTrue(Store.addKeywordException(context, "manga", "bible study", "FilterPass4"))
+        val deadline = Store.requestKeywordRemoval(context, "anime")!!
+        assertTrue(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
+        Store.removeGenericKeywordException(context, "christian")
+        assertEquals(deadline, Store.browserKeywordEntries(context).first { it.word == "anime" }.removeAt)
+        assertTrue(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
+        Store.applyDueKeywordRemovals(context, deadline)
+        assertEquals(setOf("christian"), Store.genericKeywordExceptions(context))
+        assertEquals(mapOf("manga" to setOf("bible study")), Store.keywordExceptions(context))
+        assertFalse("anime" in Store.browserKeywords(context))
+    }
 }

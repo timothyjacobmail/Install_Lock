@@ -78,4 +78,65 @@ class KeywordPageFilterTest {
         assertEquals("anime", plain.findBlock("ANIME and manga"))
         assertNull(plain.findBlock("animeish mangaverse"))
     }
+
+    @Test fun aGenericExceptionAllowsEveryBlockedWordOnThePage() {
+        val generic = KeywordPageFilter(setOf("movie", "anime", "manga"),
+            genericExceptions = setOf("christian", "bible study"))
+        assertNull(generic.findBlock("Christian movie anime and manga reviews"))
+        assertNull(generic.findBlock("Movie and manga recommendations for bible study"))
+        assertEquals("anime", generic.findBlock("Movie and anime reviews"))
+    }
+
+    @Test fun genericAndPerWordExceptionsWorkTogether() {
+        val combined = KeywordPageFilter(setOf("movie", "anime"),
+            mapOf("movie" to setOf("documentary")), setOf("christian"))
+        assertNull(combined.findBlock("A documentary movie"))
+        assertEquals("anime", combined.findBlock("A documentary movie and anime"))
+        assertNull(combined.findBlock("Christian movie and anime"))
+    }
+
+    @Test fun genericExceptionsMatchWholeWordsAndNormalizedPhrases() {
+        val generic = KeywordPageFilter(setOf("movie"), genericExceptions = setOf(" BIBLE   STUDY "))
+        assertNull(generic.findBlock("A movie for BIBLE\n study"))
+        assertEquals("movie", generic.findBlock("Movie for bible studying"))
+        val unicode = KeywordPageFilter(setOf("movie"), genericExceptions = setOf("christian"))
+        assertNull(unicode.findBlock("ＣＨＲＩＳＴＩＡＮ movie"))
+        assertEquals("movie", unicode.findBlock("Movie about Christianity"))
+    }
+
+    @Test fun genericExceptionsDoNotCarryAcrossPages() {
+        val generic = KeywordPageFilter(setOf("movie"), genericExceptions = setOf("christian"))
+        assertNull(generic.findBlock("Christian movie reviews"))
+        assertEquals("movie", generic.findBlock("Movie reviews"))
+    }
+
+    @Test fun genericExceptionRemovalRestoresBothBlockingAndQueryValidation() {
+        val enabled = KeywordPageFilter(setOf("movie"), genericExceptions = setOf("christian"))
+        assertNull(enabled.findBlock("Christian movie"))
+        assertNull(enabled.findQueryBlock("movie"))
+        val removed = KeywordPageFilter(setOf("movie"))
+        assertEquals("movie", removed.findBlock("Christian movie"))
+        assertEquals("movie", removed.findQueryBlock("movie"))
+    }
+
+    @Test fun genericRulesDeferQueriesButStillCheckActualResultContent() {
+        assertNull(GoogleSearchQuery.blockedMatch("movie anime", setOf("movie", "anime"),
+            genericExceptions = setOf("christian")))
+        val generic = KeywordPageFilter(setOf("movie", "anime"), genericExceptions = setOf("christian"))
+        assertEquals("anime", generic.findBlock("Movie and anime results"))
+    }
+
+    @Test fun invalidGenericRulesCannotAllowPagesOrDeferQueryValidation() {
+        val generic = KeywordPageFilter(setOf("movie"), genericExceptions = setOf("", "invalid|word"))
+        assertEquals("movie", generic.findBlock("A movie"))
+        assertEquals("movie", generic.findQueryBlock("movie"))
+    }
+
+    @Test fun aNegativeQueryEchoDoesNotCountAsAGenericException() {
+        val generic = KeywordPageFilter(setOf("movie"), genericExceptions = setOf("christian"))
+        val text = GoogleResultText(listOf("movie -christian"))
+            .forMatching("movie -christian - Google Search. Movie reviews")
+        assertEquals("movie", generic.findBlock(text))
+        assertNull(generic.findBlock("$text Christian reviews"))
+    }
 }

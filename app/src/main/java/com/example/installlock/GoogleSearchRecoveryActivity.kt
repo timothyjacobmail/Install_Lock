@@ -82,7 +82,8 @@ class GoogleSearchRecoveryActivity : Activity() {
                 return
             }
             val words = if (Store.browserKeywordFilterEnabled(this)) Store.browserKeywords(this) else emptySet()
-            val match = GoogleSearchQuery.blockedMatch(text, words, Store.keywordExceptions(this))
+            val match = GoogleSearchQuery.blockedMatch(text, words,
+                Store.keywordExceptions(this), Store.genericKeywordExceptions(this))
             if (match != null) {
                 message.text = "That search includes the blocked word \"$match\". Try a different search."
                 return

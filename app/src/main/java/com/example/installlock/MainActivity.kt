@@ -1071,7 +1071,8 @@ class MainActivity : Activity() {
                 "above to turn keyword protection off. Google also requires Install Lock's built-in VPN. " +
                 "Other app locks and Chrome whitelist rules still apply. " +
                 "Select a word from the dropdown, then Manage selected word to request removal ($wait-minute wait) " +
-                "or cancel a pending removal. Page exceptions can allow a blocked word when another configured word is also visible."))
+                "or cancel a pending removal. Per-word exceptions can allow one blocked word; " +
+                "generic page exceptions allow all keyword matches on that visible page."))
         col.addView(field)
         col.addView(msg)
         col.addView(add)
@@ -1083,6 +1084,7 @@ class MainActivity : Activity() {
             val selected = entries.getOrNull(list.selectedItemPosition)?.word
             goTo { showKeywordExceptions(selected) }
         })
+        col.addView(button("Generic page exceptions") { goTo { showGenericKeywordExceptions() } })
         col.addView(button("Refresh") { reopen() })
         col.addView(button("Back") { back() })
         show(ScrollView(this).apply { isFillViewport = true; addView(col) })
@@ -1094,10 +1096,64 @@ class MainActivity : Activity() {
 
     // ---------- page keyword exceptions ----------
 
+    private fun showGenericKeywordExceptions() {
+        val allowed = EditText(this).apply { hint = "Generic exception word or phrase, e.g. christian" }
+        val password = passwordField("Filter password")
+        val msg = label("")
+        val rules = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun drawRules() {
+            rules.removeAllViews()
+            val words = Store.genericKeywordExceptions(this).sorted()
+            if (words.isEmpty()) rules.addView(label("No generic page exceptions."))
+            for (word in words) {
+                rules.addView(button("Remove exception: $word") {
+                    Store.removeGenericKeywordException(this, word)
+                    msg.text = "Removed the exception immediately."
+                    drawRules()
+                })
+            }
+        }
+        val views = mutableListOf<View>(
+            label("Generic page exceptions", 22f),
+            label("These apply to browsers and the Google app. If any generic exception word or phrase " +
+                    "appears on the same visible page, that page is allowed through the keyword filter, " +
+                    "even if it contains several blocked words. For example, christian can allow a page " +
+                    "containing movie and anime. Matching uses whole words or phrases, regardless of case. " +
+                    "Adding requires the filter password; removing is immediate. " +
+                    "App locks, accessibility, Google VPN and site restrictions still apply."),
+            label("Current generic exceptions", 20f), rules, allowed, msg
+        )
+        if (Store.hasPassword(this, Store.Pw.FILTER)) {
+            views.add(password)
+            views.add(button("Add generic exception (filter password)") {
+                val word = KeywordMatcher.normalizeWord(allowed.text.toString())
+                when {
+                    word == null -> msg.text = "Use 1-80 characters: letters, numbers, spaces, apostrophes or hyphens."
+                    word in Store.genericKeywordExceptions(this) -> msg.text = "This exception already exists."
+                    Store.lockoutRemainingMs(this, Store.Pw.FILTER) > 0 -> msg.text = "Too many attempts. Try again later."
+                    !Store.addGenericKeywordException(this, word, password.text.toString()) -> msg.text = "Wrong filter password."
+                    else -> {
+                        allowed.setText("")
+                        password.setText("")
+                        msg.text = "Pages containing $word are allowed through the keyword filter."
+                        drawRules()
+                    }
+                }
+            })
+        } else {
+            views.add(button("Set filter password to add exceptions") { goTo { showFilterPasswordSetup() } })
+        }
+        views.add(button("Refresh") { reopen() })
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
+        drawRules()
+    }
+
     private fun showKeywordExceptions(initialWord: String? = null) {
         val words = Store.browserKeywords(this).sorted()
         if (words.isEmpty()) {
-            screen(label("Page exceptions", 22f), label("Add a blocked word first."), button("Back") { back() })
+            screen(label("Page exceptions", 22f), label("Add a blocked word first for per-word exceptions."),
+                button("Generic page exceptions") { goTo { showGenericKeywordExceptions() } }, button("Back") { back() })
             return
         }
         val selected = Spinner(this).apply {
@@ -1129,6 +1185,7 @@ class MainActivity : Activity() {
         }
         val views = mutableListOf<View>(
             label("Page exceptions", 22f),
+            button("Generic page exceptions") { goTo { showGenericKeywordExceptions() } },
             label("Choose a blocked word, then a word that allows it on the same visible page. " +
                     "Example: movie → christian allows movie when christian also appears. " +
                     "Any one exception for that blocked word is enough. Other blocked words are still checked. " +
