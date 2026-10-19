@@ -10,6 +10,13 @@ import javax.crypto.spec.PBEKeySpec
 object Store {
     const val UNLOCK_MS = 30 * 60 * 1000L
     const val SITE_DELAY_MS = 15 * 60 * 1000L
+    /** Longest unlock you can request. Raise or lower this to taste. */
+    const val MAX_UNLOCK_MIN = 120
+
+    fun lastUnlockMinutes(c: Context): Int = p(c).getInt("lastUnlockMin", 30)
+
+    fun setLastUnlockMinutes(c: Context, m: Int) =
+        p(c).edit().putInt("lastUnlockMin", m).apply()
 
     /** The main password, or the separate filter password. */
     enum class Pw(val prefix: String) { MAIN(""), FILTER("f_") }
