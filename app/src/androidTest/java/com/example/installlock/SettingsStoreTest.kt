@@ -40,7 +40,7 @@ class SettingsStoreTest {
     @Test
     fun settingsPersistAndCapAnExistingUnlockWithoutExtendingIt() {
         Store.setLastUnlockMinutes(context, 120)
-        Store.setUnlockedUntil(context, System.currentTimeMillis() + 120 * 60_000L)
+        prefs.edit().putLong("unlockedUntil", System.currentTimeMillis() + 120 * 60_000L).commit()
         val config = TimingConfig(mapOf(TimingOption.MAX_UNLOCK to 10,
             TimingOption.DEFAULT_UNLOCK to 5, TimingOption.SITE_WAIT to 2), listOf(1, 5, 10))
         Store.saveTimingConfig(context, config)

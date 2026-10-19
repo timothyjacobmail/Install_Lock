@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.ArrayAdapter
 import android.widget.Button
@@ -17,6 +18,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Switch
 import android.widget.Toast
 import android.window.OnBackInvokedDispatcher
 import java.text.DateFormat
@@ -214,7 +216,7 @@ class MainActivity : Activity() {
         screen(
             label("Set a password", 22f),
             label("At least 8 characters, with at least one letter and one number. " +
-                    "You'll need it to unlock YouTube, Chrome and any other protected app."),
+                    "You'll need it to open the dashboard and set up the separate protection passwords."),
             p1, p2, msg,
             button("Save password") {
                 val a = p1.text.toString()
@@ -254,10 +256,11 @@ class MainActivity : Activity() {
                 }
             },
             button("Chrome whitelist") { goTo { showChromeSites() } },
+            button("App locks") { goTo { showAppPicker() } },
             button("Settings") { openSettings() },
             status,
             button("Lock protected apps now") {
-                Store.setUnlockedUntil(this, 0L)
+                Store.lockProtectedApps(this)
                 Policy.sweep(this)
                 reopen()
             }
@@ -294,23 +297,23 @@ class MainActivity : Activity() {
             label(curboxStatus()),
             minutes,
             presets,
-            button("Unlock protected apps") {
+            button("Unlock protected apps (app-lock password)") {
                 val m = minutes.text.toString().toIntOrNull()
-                if (m == null || m < 1 || m > maxUnlock) {
-                    toast("Enter 1 to $maxUnlock minutes.")
+                val currentMax = Store.timingConfig(this)[TimingOption.MAX_UNLOCK]
+                if (m == null || m < 1 || m > currentMax) {
+                    toast("Enter 1 to $currentMax minutes.")
                 } else {
-                    Store.setLastUnlockMinutes(this, m)
-                    Store.setUnlockedUntil(this, System.currentTimeMillis() + m * 60_000L)
-                    Policy.sweep(this)
-                    reopen()
+                    withAppLockPassword("Unlock protected apps for $m minutes") { password ->
+                        Store.unlockProtectedApps(this, m, password)
+                    }
                 }
             },
             button("Lock protected apps now") {
-                Store.setUnlockedUntil(this, 0L)
+                Store.lockProtectedApps(this)
                 Policy.sweep(this)
                 reopen()
             },
-            button("Choose protected apps") { goTo { showAppPicker() } },
+            button("App locks") { goTo { showAppPicker() } },
             button("Never-install list") { goTo { showNeverInstall() } },
             button("Google app filter") { goTo { showGoogleFilter() } },
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
@@ -429,39 +432,128 @@ class MainActivity : Activity() {
         val home = pm.resolveActivity(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
         )?.activityInfo?.packageName
-        val apps = pm.queryIntentActivities(
+        val selected = Store.protectedApps(this)
+        val launchable = pm.queryIntentActivities(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0
         )
             .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+        // Keep existing selections visible even if their launcher icon has disappeared.
+        val existing = selected.map { pkg ->
+            val name = try { pm.getApplicationInfo(pkg, 0).loadLabel(pm).toString() }
+                catch (_: Exception) { "$pkg (not installed)" }
+            pkg to name
+        }
+        val apps = (launchable + existing)
             .filter { it.first != packageName && it.first != home }
             .distinctBy { it.first }
             .sortedBy { it.second.lowercase() }
 
-        val current = Store.protectedApps(this)
         val list = ListView(this)
-        list.choiceMode = ListView.CHOICE_MODE_MULTIPLE
-        list.adapter = ArrayAdapter(
-            this, android.R.layout.simple_list_item_multiple_choice, apps.map { it.second }
-        )
-        apps.forEachIndexed { i, a -> list.setItemChecked(i, a.first in current) }
-
-        val save = button("Save") {
-            val chosen = apps.indices.filter { list.isItemChecked(it) }.map { apps[it].first }.toSet()
-            Store.setProtectedApps(this, chosen)
-            Policy.release(this, current - chosen)
-            Policy.sweep(this)
-            back()
+        list.adapter = object : ArrayAdapter<Pair<String, String>>(this, android.R.layout.simple_list_item_1, apps) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val (pkg, name) = getItem(position)!!
+                return Switch(this@MainActivity).apply {
+                    text = name
+                    textSize = 16f
+                    setPadding(dp(8), dp(16), dp(8), dp(16))
+                    isChecked = pkg in selected
+                    setOnCheckedChangeListener { _, enabled ->
+                        if (enabled) {
+                            Store.addAppLock(this@MainActivity, pkg)
+                            Policy.sweep(this@MainActivity)
+                            reopen()
+                        } else {
+                            // Stay visibly locked until the password has actually been verified.
+                            setOnCheckedChangeListener(null)
+                            isChecked = true
+                            withAppLockPassword("Remove lock from $name") { password ->
+                                val removed = Store.removeAppLock(this@MainActivity, pkg, password)
+                                if (removed) Policy.release(this@MainActivity, listOf(pkg))
+                                removed
+                            }
+                        }
+                    }
+                }
+            }
         }
-        val cancel = button("Cancel") { back() }
 
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
-        col.addView(label("Choose protected apps", 22f))
+        col.addView(label("App locks", 22f))
+        col.addView(label("Switch on to lock an app immediately, without a password. " +
+                "This ends any temporary unlock session. Switching off requires the separate app-lock password. " +
+                "Other install delays and filters can still block an app."))
+        col.addView(label(unlockStatus()))
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        col.addView(save)
-        col.addView(cancel)
+        col.addView(button(if (Store.hasPassword(this, Store.Pw.APP_LOCK))
+            "Change app-lock password" else "Set app-lock password") { configureAppLockPassword() })
+        col.addView(button("Back") { back() })
         show(col)
+    }
+
+    private fun withAppLockPassword(title: String, operation: (String) -> Boolean) {
+        if (!Store.hasPassword(this, Store.Pw.APP_LOCK)) {
+            toast("Set the app-lock password first, then retry this action.")
+            configureAppLockPassword()
+            return
+        }
+        goTo {
+            showCredentialGate(title, Store.Pw.APP_LOCK, operation) {
+                Policy.sweep(this)
+                back()
+            }
+        }
+    }
+
+    private fun configureAppLockPassword() {
+        if (Store.hasPassword(this, Store.Pw.APP_LOCK) || authed) {
+            goTo { showAppLockPasswordEditor() }
+        } else {
+            goTo {
+                showPasswordGate("Set up app-lock password", Store.Pw.MAIN) {
+                    swapTo { showAppLockPasswordEditor() }
+                }
+            }
+        }
+    }
+
+    private fun showAppLockPasswordEditor() {
+        val changing = Store.hasPassword(this, Store.Pw.APP_LOCK)
+        val old = passwordField("Current app-lock password")
+        val p1 = passwordField("New app-lock password")
+        val p2 = passwordField("Confirm app-lock password")
+        val msg = label("")
+        val views = mutableListOf<View>(
+            label(if (changing) "Change app-lock password" else "Set app-lock password", 22f),
+            label("This separate password is needed to remove app locks or temporarily unlock apps. " +
+                    "Adding a lock is always allowed. Use 8+ characters with a letter and a number.")
+        )
+        if (changing) views.add(old)
+        views.addAll(listOf(p1, p2, msg, button("Save password") {
+            val value = p1.text.toString()
+            val which = Store.Pw.APP_LOCK
+            when {
+                !changing && Store.hasPassword(this, which) -> {
+                    toast("An app-lock password has already been set.")
+                    back()
+                }
+                !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
+                value != p2.text.toString() -> msg.text = "Passwords don't match."
+                changing && Store.lockoutRemainingMs(this, which) > 0 -> msg.text = "Too many attempts. Try again later."
+                changing && !Store.checkPassword(this, old.text.toString(), which) -> msg.text = "Current app-lock password is wrong."
+                else -> {
+                    Store.setPassword(this, value, which)
+                    if (!changing) {
+                        Store.lockProtectedApps(this)
+                        Policy.sweep(this)
+                    }
+                    toast("App-lock password saved.")
+                    back()
+                }
+            }
+        }, button("Cancel") { back() }))
+        screen(*views.toTypedArray())
     }
 
     // ---------- Google app filter ----------
@@ -536,10 +628,15 @@ class MainActivity : Activity() {
     }
 
     private fun showPasswordGate(title: String, which: Store.Pw, action: () -> Unit) {
+        showCredentialGate(title, which, { Store.checkPassword(this, it, which) }, action)
+    }
+
+    private fun showCredentialGate(title: String, which: Store.Pw, verify: (String) -> Boolean, action: () -> Unit) {
         val passwordName = when (which) {
             Store.Pw.MAIN -> "main password"
             Store.Pw.FILTER -> "filter password"
             Store.Pw.SETTINGS -> "settings password"
+            Store.Pw.APP_LOCK -> "app-lock password"
         }
         val pw = passwordField(passwordName.replaceFirstChar { it.uppercase() })
         val msg = label("")
@@ -551,7 +648,7 @@ class MainActivity : Activity() {
                 val wait = Store.lockoutRemainingMs(this, which)
                 if (wait > 0) {
                     msg.text = "Too many attempts. Try again in ${(wait + 59_999) / 60_000} min."
-                } else if (Store.checkPassword(this, pw.text.toString(), which)) {
+                } else if (verify(pw.text.toString())) {
                     action()
                 } else {
                     val w = Store.lockoutRemainingMs(this, which)

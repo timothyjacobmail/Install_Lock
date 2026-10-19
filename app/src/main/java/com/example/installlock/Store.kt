@@ -59,7 +59,7 @@ object Store {
     }
 
     /** Each password has its own salt, hash, attempt counter and lockout deadline. */
-    enum class Pw(val prefix: String) { MAIN(""), FILTER("f_"), SETTINGS("s_") }
+    enum class Pw(val prefix: String) { MAIN(""), FILTER("f_"), SETTINGS("s_"), APP_LOCK("a_") }
 
     private val DEFAULT_PROTECTED = setOf("com.google.android.youtube", "com.android.chrome","com.vivo.browser")
     private val DEFAULT_BLOCKED = setOf(
@@ -136,13 +136,30 @@ object Store {
     fun protectedApps(c: Context): Set<String> =
         p(c).getStringSet("protected", DEFAULT_PROTECTED)!!.toSet()
 
-    fun setProtectedApps(c: Context, s: Set<String>) =
-        p(c).edit().putStringSet("protected", s).apply()
+    /** Strengthening protection is always allowed and immediately ends any unlock session. */
+    fun addAppLock(c: Context, pkg: String) {
+        p(c).edit().putStringSet("protected", protectedApps(c) + pkg)
+            .putLong("unlockedUntil", 0L).apply()
+    }
+
+    fun removeAppLock(c: Context, pkg: String, password: String): Boolean {
+        if (!hasPassword(c, Pw.APP_LOCK) || !checkPassword(c, password, Pw.APP_LOCK)) return false
+        p(c).edit().putStringSet("protected", protectedApps(c) - pkg).apply()
+        return true
+    }
 
     fun unlockedUntil(c: Context) = p(c).getLong("unlockedUntil", 0L)
 
-    fun setUnlockedUntil(c: Context, t: Long) =
-        p(c).edit().putLong("unlockedUntil", timingConfig(c).capUnlockUntil(t, System.currentTimeMillis())).apply()
+    fun lockProtectedApps(c: Context) = p(c).edit().putLong("unlockedUntil", 0L).apply()
+
+    fun unlockProtectedApps(c: Context, minutes: Int, password: String): Boolean {
+        val config = timingConfig(c)
+        if (minutes !in 1..config[TimingOption.MAX_UNLOCK]) return false
+        if (!hasPassword(c, Pw.APP_LOCK) || !checkPassword(c, password, Pw.APP_LOCK)) return false
+        p(c).edit().putInt("lastUnlockMin", minutes)
+            .putLong("unlockedUntil", System.currentTimeMillis() + minutes * 60_000L).apply()
+        return true
+    }
 
     // ---------- Google app DNS blocklist ----------
 
