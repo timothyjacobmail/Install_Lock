@@ -13,12 +13,18 @@ data class AppLockReasons(
     val curboxMissing: Boolean = false,
     val neverInstallRule: String? = null,
     val googleVpnMissing: Boolean = false,
-    val domainServiceMissing: Boolean = false
+    val domainServiceMissing: Boolean = false,
+    val curfewUntil: Long? = null
 ) {
     val shouldLock: Boolean get() = keywordServiceMissing || appLock || installWaitUntil != null ||
-            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing
+            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing || curfewUntil != null
 
     fun descriptions(): List<String> = buildList {
+        curfewUntil?.let {
+            val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
+            add("Night curfew is active until $end. Curfew overrides temporary app unlocks, whitelists and category exemptions. " +
+                "Only an appeal submitted before 9 pm can postpone that night's start to midnight.")
+        }
         if (domainServiceMissing) add("Ordered domain rules require Install Lock's browser accessibility service. " +
                 if (accessibilityEnabled) "The service is enabled but has not connected; wait for it or re-enable it."
                 else "The service is disabled. Enable it in Android Accessibility settings.")
@@ -33,18 +39,18 @@ data class AppLockReasons(
                         "Enable Install Lock's browser and Google keyword service in Android Accessibility settings."
         )
         if (appLock) add("This app is selected in App locks and has no active temporary unlock. " +
-                "Use the app-lock password to unlock it temporarily or remove its app lock.")
+                "Use this app's temporary-access password to unlock only this app, or its separate removal password to remove its manual lock.")
         installWaitUntil?.let {
             val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
             add("The new-app install waiting period ends at $end.")
         }
         if (otherBrowser) add("Chrome whitelist protection blocks other browsers. " +
-                "Use Chrome, or use the filter password to turn off Chrome whitelist protection.")
+                "Use Chrome, or use the Chrome-whitelist-off task password to turn off Chrome whitelist protection.")
         if (curboxMissing) add("Curbox's accessibility service is not running and its grace period has ended. " +
-                "Re-enable Curbox, or use the filter password to turn off the Curbox guard.")
+                "Re-enable Curbox, or use the Curbox-off task password to turn off the Curbox guard.")
         neverInstallRule?.let {
             add("Its app name or package matches the never-install rule \"$it\". " +
-                    "Install Lock also attempts to uninstall it; removing this rule requires the filter password.")
+                    "Install Lock also attempts to uninstall it; removing this rule requires the never-install removal task password.")
         }
     }
 }

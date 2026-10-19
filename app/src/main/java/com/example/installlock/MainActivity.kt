@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
         // Cleared when the app leaves the screen
         private var authed = false
         private val shareLinkExecutor = Executors.newSingleThreadExecutor()
+        private val credentialExecutor = Executors.newSingleThreadExecutor()
     }
 
     // ---------- navigation ----------
@@ -50,7 +51,8 @@ class MainActivity : AppCompatActivity() {
     private var sharedSiteOptions = emptyList<String>()
     private var sharedSiteText: String? = null
     private var shareLinkTask: Future<*>? = null
-    private var settingsAuthed = false
+    private var credentialJob: Future<*>? = null
+    private var credentialGeneration = 0
     private val sectionStates = mutableMapOf<String, Boolean>()
 
     /** Go forward to a new screen. Back returns to the one we left. */
@@ -61,14 +63,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun unlockStatus(): String {
-        val until = Store.unlockedUntil(this)
-        val left = until - System.currentTimeMillis()
-        return if (left > 0)
-            "App-lock timer: temporarily unlocked until " +
-                    DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(until)) +
-                    " (${(left + 59_999) / 60_000} min left). Other protections can still lock an app."
-        else
-            "App-lock timer: no temporary unlock is active."
+        val active = Store.protectedApps(this).count { Store.unlockedUntil(this, it) > System.currentTimeMillis() }
+        return "$active app(s) have temporary access. Each app has its own timer and credential. Other protections remain active."
     }
 
     private fun chromeLockExplanation(statuses: List<AppLockStatus>): String =
@@ -210,7 +206,9 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         shareLinkTask?.cancel(true)
         shareLinkTask = null
-        settingsAuthed = false
+        credentialGeneration++
+        credentialJob?.cancel(true)
+        credentialJob = null
         if (!isChangingConfigurations) {
             authed = false
             history.clear()
@@ -262,9 +260,8 @@ class MainActivity : AppCompatActivity() {
                 Policy.sweep(this)
             }
             if (removed.isNotEmpty()) {
-                withFilterPassword("Allow uninstalling again") {
-                    commit()
-                    repeat(2) { back() }
+                withTaskPassword(TaskScope(TaskKind.UNINSTALL_REMOVE), "Remove selected uninstall protection") { password ->
+                    TaskPasswords.run(this, TaskScope(TaskKind.UNINSTALL_REMOVE), password) { commit(); true }
                 }
             } else {
                 commit()
@@ -278,7 +275,7 @@ class MainActivity : AppCompatActivity() {
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
         col.addView(label("Prevent-uninstall apps", 22f))
         col.addView(label("Ticked apps can't be uninstalled, force-stopped or have their data cleared. " +
-                "Install Lock is always protected. Unticking an app needs the filter password."))
+                "Install Lock is always protected. Unticking an app needs the task password."))
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         col.addView(save)
         col.addView(cancel)
@@ -358,6 +355,7 @@ class MainActivity : AppCompatActivity() {
             }),
             UiStyle.eyebrow(this, "PROTECTION TOOLS"),
             button("Why apps are locked") { goTo { showLockReasons() } },
+            curfewActions(),
             browserActions(),
             section("Apps", "Choose apps to lock or end an unlock session",
                 button("App locks") { goTo { showAppPicker() } },
@@ -368,101 +366,83 @@ class MainActivity : AppCompatActivity() {
                 }),
             section("Settings & passwords", "Separate password required for settings",
                 button("Settings") { openSettings() },
+                button("Task passwords") { goTo { showTaskPasswords() } },
                 button("About & licenses") { goTo { showAbout() } }),
             section("Protection status", "Current app and browser protection",
                 status, label(chromeLockExplanation(locks)), label(curboxStatus()), label(playAccessSummary()))
         )
     }
 
+    private fun curfewActions() = section("Night curfew", "11 pm–4 am · takes priority over app unlocks",
+        button("Curfew status, apps & appeal") { goTo { showCurfew() } })
+
+    private fun showCurfew() {
+        Policy.sweep(this)
+        val now = System.currentTimeMillis()
+        val zone = CurfewStore.zone()
+        val night = CurfewRules.night(now, zone)
+        val appealed = CurfewStore.appealedNight(this)
+        val until = CurfewRules.blockedUntil(now, zone, appealed)
+        val names = CurfewStore.targets(this).mapNotNull { pkg ->
+            try { "${packageManager.getApplicationInfo(pkg, 0).loadLabel(packageManager)} ($pkg)" }
+            catch (_: Exception) { null }
+        }.sorted()
+        screen(label("Night curfew", 24f),
+            label("Every night: 11 pm–4 am. Time zone: $zone."),
+            label(if (until != null) "Curfew is active. App passwords cannot bypass it."
+                else if (appealed == night.toString()) "Appeal saved for $night: tonight's curfew starts at midnight and ends at 4 am."
+                else "Curfew starts at 11 pm for the night of $night."),
+            label("An appeal must be submitted strictly before 9 pm. It postpones only that night's curfew until midnight. " +
+                "Other restrictions remain active. No late appeals, extensions or permanent off switch."),
+            button("Appeal tonight: access until midnight") {
+                if (CurfewStore.appeal(this)) toast("Appeal saved for tonight. Curfew starts at midnight.")
+                else toast("Appeal unavailable: the 9 pm deadline has passed, or tonight was already appealed.")
+                LockService.start(this)
+                reopen()
+            }.apply { isEnabled = Policy.isOwner(this@MainActivity) && CurfewRules.canAppeal(now, zone, appealed) },
+            label("Browsers, Google, YouTube, Instagram and protected apps are included. Apps downloaded from the day this feature " +
+                "is first run onward join automatically and remain included on future nights. Category exemptions do not bypass curfew."),
+            section("Curfew apps (${names.size})", "Automatically enrolled; removing an app lock does not remove curfew",
+                *names.map { label(it) }.toTypedArray()),
+            button("Refresh") { reopen() }, button("Back") { back() })
+    }
+
     private fun showDashboard() {
-        val locks = Policy.lockStatuses(this)
-        val shotsBlocked = Policy.isScreenCaptureBlocked(this)
-        val hasFilterPw = Store.hasPassword(this, Store.Pw.FILTER)
-        val timings = Store.timingConfig(this)
-        val maxUnlock = timings[TimingOption.MAX_UNLOCK]
-
-        val minutes = EditText(this)
-        minutes.inputType = InputType.TYPE_CLASS_NUMBER
-        minutes.hint = "Minutes"
-        minutes.setText(Store.lastUnlockMinutes(this).toString())
-
-        val presetRow = LinearLayout(this)
-        presetRow.orientation = LinearLayout.HORIZONTAL
-        for (m in timings.unlockPresets) {
-            presetRow.addView(
-                button("$m") { minutes.setText(m.toString()) },
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            )
-        }
-        val presets = HorizontalScrollView(this).apply { addView(presetRow) }
-
-        screen(
-            UiStyle.eyebrow(this, "YOUR DASHBOARD"),
-            label("Install Lock", 26f),
-            label(unlockStatus()),
+        screen(UiStyle.eyebrow(this, "YOUR DASHBOARD"), label("Install Lock", 26f),
+            label("The main password opens this dashboard. Each sensitive operation needs its own task password."),
             button("Why apps are locked") { goTo { showLockReasons() } },
-            section("Unlock protected apps", "Choose a temporary unlock duration",
-            label("Unlock for how many minutes? (max $maxUnlock)"),
-            minutes,
-            presets,
-            button("Unlock protected apps (app-lock password)") {
-                val m = minutes.text.toString().toIntOrNull()
-                val currentMax = Store.timingConfig(this)[TimingOption.MAX_UNLOCK]
-                if (m == null || m < 1 || m > currentMax) {
-                    toast("Enter 1 to $currentMax minutes.")
-                } else {
-                    withAppLockPassword("Unlock protected apps for $m minutes") { password ->
-                        Store.unlockProtectedApps(this, m, password)
-                    }
-                }
-            }, initiallyExpanded = true),
-            section("Apps", "App locks, install rules and uninstall protection",
-            button("Lock protected apps now") {
-                Store.lockProtectedApps(this)
-                Policy.sweep(this)
-                reopen()
-            },
-            button("App locks") { goTo { showAppPicker() } },
-            button("Never-install list") { goTo { showNeverInstall() } },
-            button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } }),
+            curfewActions(),
+            section("App access", "Separate access, removal and duration passwords for each app",
+                button("Temporarily unlock one app") { goTo { showAppAccess() } },
+                button("App locks") { goTo { showAppPicker() } },
+                button("Lock protected apps now") { Store.lockProtectedApps(this); Policy.sweep(this); reopen() },
+                button("Never-install list") { goTo { showNeverInstall() } },
+                button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } }),
             browserActions(),
-            section("Additional protections", "Screenshots and the Curbox guard",
-            label(curboxStatus()),
-            button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
-                toast(Policy.setScreenCaptureBlocked(this, !shotsBlocked))
-                reopen()
-            },
-            button(if (Store.curboxGuard(this)) "Turn Curbox guard OFF (filter password)" else "Turn Curbox guard ON") {
-                if (Store.curboxGuard(this)) {
-                    withFilterPassword("Turn Curbox guard off") {
-                        Store.setCurboxGuard(this, false)
-                        Policy.release(this, Policy.CURBOX_GUARDED)
-                        Policy.sweep(this)
-                        back()
-                    }
-                } else if (!Policy.curboxRunning(this)) {
-                    toast("Curbox's accessibility service isn't running yet. Set up Curbox first.")
-                } else {
-                    Store.setCurboxGuard(this, true)
-                    Policy.sweep(this)
-                    reopen()
-                }
-            }),
-            section("Settings & passwords", "Durations, Play Store access and separate passwords",
-                button("Settings") { openSettings() },
-                button("Change main password") { goTo { showChangePassword() } },
-                button(if (hasFilterPw) "Change filter password" else "Set filter password") {
-                    if (hasFilterPw) goTo { showChangeFilterPassword() } else goTo { showFilterPasswordSetup() }
+            section("Additional protections", "Separate credentials for each protection",
+                label(curboxStatus()),
+                button(if (Policy.isScreenCaptureBlocked(this)) "Allow screenshots (task password)" else "Block screenshots") {
+                    if (Policy.isScreenCaptureBlocked(this)) withTaskPassword(TaskScope(TaskKind.SCREENSHOTS_ALLOW), "Allow screenshots") {
+                        Policy.setScreenCaptureBlocked(this, false, it)?.startsWith("Error:") == false
+                    } else { toast(Policy.setScreenCaptureBlocked(this, true).orEmpty()); reopen() }
                 },
-                button(if (Store.hasPassword(this, Store.Pw.APP_LOCK)) "Change app-lock password" else "Set app-lock password") {
-                    configureAppLockPassword()
-                }, button("About & licenses") { goTo { showAbout() } }),
-            section("Protection status", "Current app and browser protection",
-                label(chromeLockExplanation(locks)),
-                label("Chrome whitelist: " + if (Store.chromeLock(this)) "ON" else "OFF"),
-                label("New-app waiting period: ${timings[TimingOption.INSTALL_WAIT]} minutes."),
-                label(playAccessSummary()))
-        )
+                button(if (Store.curboxGuard(this)) "Turn Curbox guard off (task password)" else "Turn Curbox guard on") {
+                    if (Store.curboxGuard(this)) withTaskPassword(TaskScope(TaskKind.CURBOX_OFF), "Turn Curbox guard off") { password ->
+                        TaskPasswords.run(this, TaskScope(TaskKind.CURBOX_OFF), password) {
+                            Store.setCurboxGuard(this, false)
+                            Policy.release(this, Policy.CURBOX_GUARDED)
+                            true
+                        }
+                    } else if (!Policy.curboxRunning(this)) toast("Set up Curbox's accessibility service first.")
+                    else { Store.setCurboxGuard(this, true); Policy.sweep(this); reopen() }
+                }),
+            section("Settings & passwords", "Each save and password change is scoped to its own task",
+                button("Settings") { openSettings() },
+                button("Task passwords") { goTo { showTaskPasswords() } },
+                button("Change main dashboard password") { goTo { showChangePassword() } },
+                button("About & licenses") { goTo { showAbout() } }),
+            section("Protection status", "Other protections continue during temporary app access",
+                label(unlockStatus()), label(chromeLockExplanation(Policy.lockStatuses(this))), label(playAccessSummary())))
     }
 
     private fun showNeverInstall() {
@@ -471,9 +451,11 @@ class MainActivity : AppCompatActivity() {
         list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rules)
         list.setOnItemClickListener { _, _, i, _ ->
             val rule = rules[i]
-            withFilterPassword("Allow \"$rule\" again") {
-                Store.setNeverInstall(this, Store.neverInstall(this) - rule)
-                back()
+            withTaskPassword(TaskScope(TaskKind.NEVER_REMOVE), "Remove never-install rule: $rule") { password ->
+                TaskPasswords.run(this, TaskScope(TaskKind.NEVER_REMOVE), password) {
+                    Store.setNeverInstall(this, Store.neverInstall(this) - rule)
+                    true
+                }
             }
         }
 
@@ -514,7 +496,7 @@ class MainActivity : AppCompatActivity() {
         col.addView(label("Never-install list", 22f))
         col.addView(label("Any app whose name or package contains one of these words is suspended " +
                 "and uninstalled within seconds of installing, from the Play Store or an APK. " +
-                "Tap an entry to remove it (filter password)."))
+                "Tap an entry to remove it (task password)."))
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         col.addView(field)
         col.addView(msg)
@@ -586,7 +568,7 @@ class MainActivity : AppCompatActivity() {
                             // Stay visibly locked until the password has actually been verified.
                             setOnCheckedChangeListener(null)
                             isChecked = true
-                            withAppLockPassword("Remove lock from $name") { password ->
+                            withTaskPassword(TaskScope(TaskKind.APP_REMOVE, pkg), "Remove lock only from $name") { password ->
                                 val removed = Store.removeAppLock(this@MainActivity, pkg, password)
                                 if (removed) Policy.release(this@MainActivity, listOf(pkg))
                                 removed
@@ -602,82 +584,16 @@ class MainActivity : AppCompatActivity() {
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
         col.addView(label("App locks", 22f))
         col.addView(label("Switch on to lock an app immediately, without a password. " +
-                "This ends any temporary unlock session. Switching off requires the separate app-lock password. " +
+                "This immediately ends temporary access for that app. Switching off requires the separate app-specific task password. " +
                 "Other install delays and filters can still block an app."))
         col.addView(label(unlockStatus()))
         col.addView(button("Why apps are locked") { goTo { showLockReasons() } })
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
-        col.addView(button(if (Store.hasPassword(this, Store.Pw.APP_LOCK))
-            "Change app-lock password" else "Set app-lock password") { configureAppLockPassword() })
+        col.addView(button("Temporary app access") { goTo { showAppAccess() } })
+        col.addView(button("Task passwords") { goTo { showTaskPasswords() } })
         col.addView(button("Back") { back() })
         show(col)
     }
-
-    private fun withAppLockPassword(title: String, operation: (String) -> Boolean) {
-        if (!Store.hasPassword(this, Store.Pw.APP_LOCK)) {
-            toast("Set the app-lock password first, then retry this action.")
-            configureAppLockPassword()
-            return
-        }
-        goTo {
-            showCredentialGate(title, Store.Pw.APP_LOCK, operation) {
-                Policy.sweep(this)
-                back()
-            }
-        }
-    }
-
-    private fun configureAppLockPassword() {
-        if (Store.hasPassword(this, Store.Pw.APP_LOCK) || authed) {
-            goTo { showAppLockPasswordEditor() }
-        } else {
-            goTo {
-                showPasswordGate("Set up app-lock password", Store.Pw.MAIN) {
-                    swapTo { showAppLockPasswordEditor() }
-                }
-            }
-        }
-    }
-
-    private fun showAppLockPasswordEditor() {
-        val changing = Store.hasPassword(this, Store.Pw.APP_LOCK)
-        val old = passwordField("Current app-lock password")
-        val p1 = passwordField("New app-lock password")
-        val p2 = passwordField("Confirm app-lock password")
-        val msg = label("")
-        val views = mutableListOf<View>(
-            label(if (changing) "Change app-lock password" else "Set app-lock password", 22f),
-            label("This separate password is needed to remove app locks or temporarily unlock apps. " +
-                    "Adding a lock is always allowed. Use 8+ characters with a letter and a number.")
-        )
-        if (changing) views.add(old)
-        views.addAll(listOf(p1, p2, msg, button("Save password") {
-            val value = p1.text.toString()
-            val which = Store.Pw.APP_LOCK
-            when {
-                !changing && Store.hasPassword(this, which) -> {
-                    toast("An app-lock password has already been set.")
-                    back()
-                }
-                !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
-                value != p2.text.toString() -> msg.text = "Passwords don't match."
-                changing && Store.lockoutRemainingMs(this, which) > 0 -> msg.text = "Too many attempts. Try again later."
-                changing && !Store.checkPassword(this, old.text.toString(), which) -> msg.text = "Current app-lock password is wrong."
-                else -> {
-                    Store.setPassword(this, value, which)
-                    if (!changing) {
-                        Store.lockProtectedApps(this)
-                        Policy.sweep(this)
-                    }
-                    toast("App-lock password saved.")
-                    back()
-                }
-            }
-        }, button("Cancel") { back() }))
-        screen(*views.toTypedArray())
-    }
-
-    // ---------- Google app filter ----------
 
     private fun showGoogleFilter() {
         val msg = label("")
@@ -698,10 +614,9 @@ class MainActivity : AppCompatActivity() {
             status,
             msg,
             button("Turn on") { msg.text = Policy.enableGoogleFilter(this) },
-            button("Turn off (filter password)") {
-                withFilterPassword("Turn off the Google app filter") {
-                    toast(Policy.disableGoogleFilter(this))
-                    back()
+            button("Turn off (task password)") {
+                withTaskPassword(TaskScope(TaskKind.VPN_OFF), "Turn off Google VPN") {
+                    Policy.disableGoogleFilter(this, it)?.startsWith("Error:") == false
                 }
             },
             button("DNS log / tune blocklist") { goTo { showDnsLog() } },
@@ -727,11 +642,11 @@ class MainActivity : AppCompatActivity() {
                 toast("Blocking $name")
                 reopen()
             } else {
-                withFilterPassword("Unblock $name") {
-                    rules.removeAll(hits.toSet())
-                    Store.setBlockedDomains(this, rules)
-                    toast("Unblocked. Removed rule: ${hits.joinToString()}")
-                    back()
+                withTaskPassword(TaskScope(TaskKind.DNS_UNBLOCK), "Unblock Google DNS domain: $name") { password ->
+                    TaskPasswords.run(this, TaskScope(TaskKind.DNS_UNBLOCK), password) {
+                        Store.setBlockedDomains(this, Store.blockedDomains(this) - hits.toSet())
+                        true
+                    }
                 }
             }
         }
@@ -749,130 +664,13 @@ class MainActivity : AppCompatActivity() {
         show(col)
     }
 
-    // ---------- filter password ----------
+    // ---------- task password ----------
 
-    /** Asks for the filter password, then runs [action]. Weakening actions go through here. */
-    private fun withFilterPassword(title: String, action: () -> Unit) {
-        if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-            goTo { showFilterPasswordSetup() }
-        } else {
-            goTo { showPasswordGate(title, Store.Pw.FILTER, action) }
-        }
-    }
-
-    private fun showPasswordGate(title: String, which: Store.Pw, action: () -> Unit) {
-        showCredentialGate(title, which, { Store.checkPassword(this, it, which) }, action)
-    }
-
-    private fun showCredentialGate(title: String, which: Store.Pw, verify: (String) -> Boolean, action: () -> Unit) {
-        val passwordName = when (which) {
-            Store.Pw.MAIN -> "main password"
-            Store.Pw.FILTER -> "filter password"
-            Store.Pw.SETTINGS -> "settings password"
-            Store.Pw.APP_LOCK -> "app-lock password"
-        }
-        val pw = passwordField(passwordName.replaceFirstChar { it.uppercase() })
-        val msg = errorLabel()
-        screen(
-            label(title, 22f),
-            label("Enter the $passwordName."),
-            pw, msg,
-            primaryButton("Confirm") {
-                val password = pw.text.toString()
-                if (password.isBlank()) {
-                    msg.text = "Enter password"
-                    return@primaryButton
-                }
-                val wait = Store.lockoutRemainingMs(this, which)
-                if (wait > 0) {
-                    msg.text = "Too many attempts. Try again in ${(wait + 59_999) / 60_000} min."
-                } else if (verify(password)) {
-                    action()
-                } else {
-                    val w = Store.lockoutRemainingMs(this, which)
-                    msg.text = if (w > 0) "Too many attempts. Try again in ${(w + 59_999) / 60_000} min."
-                    else "Wrong $passwordName."
-                }
-            },
-            button("Cancel") { back() }
-        )
-    }
-
-    private fun showFilterPasswordSetup(onSaved: (() -> Unit)? = null) {
-        if (authed) {
-            showSetFilterPassword(onSaved)
-        } else {
-            showPasswordGate("Set up filter password", Store.Pw.MAIN) {
-                swapTo { showSetFilterPassword(onSaved) }
-            }
-        }
-    }
-
-    private fun showSetFilterPassword(onSaved: (() -> Unit)? = null) {
-        val p1 = passwordField("New filter password")
-        val p2 = passwordField("Confirm filter password")
-        val msg = label("")
-        screen(
-            label("Set the filter password", 22f),
-            label("A second, separate password. It's needed to turn filters off, unblock domains " +
-                    "or add Chrome whitelist sites. It works best if someone else types it in, " +
-                    "so only they know it. 8+ characters with a letter and a number."),
-            p1, p2, msg,
-            button("Save") {
-                val a = p1.text.toString()
-                when {
-                    Store.hasPassword(this, Store.Pw.FILTER) -> msg.text = "A filter password is already set. Go back and use it."
-                    !Store.isValidNewPassword(a) -> msg.text = "Needs 8+ characters with a letter and a number."
-                    a != p2.text.toString() -> msg.text = "Passwords don't match."
-                    else -> {
-                        Store.setPassword(this, a, Store.Pw.FILTER)
-                        if (onSaved != null) onSaved() else back()
-                    }
-                }
-            },
-            button("Cancel") { back() }
-        )
-    }
-
-    private fun showChangeFilterPassword() {
-        val f = Store.Pw.FILTER
-        val old = passwordField("Current filter password")
-        val p1 = passwordField("New filter password")
-        val p2 = passwordField("Confirm new filter password")
-        val msg = label("")
-        screen(
-            label("Change filter password", 22f),
-            old, p1, p2, msg,
-            button("Save") {
-                val n = p1.text.toString()
-                when {
-                    Store.lockoutRemainingMs(this, f) > 0 -> msg.text = "Too many attempts. Try again later."
-                    !Store.checkPassword(this, old.text.toString(), f) -> msg.text = "Current filter password is wrong."
-                    !Store.isValidNewPassword(n) -> msg.text = "Needs 8+ characters with a letter and a number."
-                    n != p2.text.toString() -> msg.text = "Passwords don't match."
-                    else -> {
-                        Store.setPassword(this, n, f)
-                        back()
-                    }
-                }
-            },
-            button("Cancel") { back() }
-        )
-    }
-
-    // ---------- Chrome whitelist ----------
-
+    /** Asks for the task password, then runs [action]. Weakening actions go through here. */
     private fun showSharedSite() {
-        val openForm = { swapTo {
-            val shortLink = SharedSite.shortLinkFromText(sharedSiteText)
-            if (shortLink != null) showResolveSharedSite(shortLink)
-            else showAddSite(sharedSiteOptions.firstOrNull().orEmpty(), sharedSiteOptions)
-        } }
-        if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-            showFilterPasswordSetup(onSaved = openForm)
-        } else {
-            showPasswordGate("Add to Chrome whitelist", Store.Pw.FILTER, openForm)
-        }
+        val shortLink = SharedSite.shortLinkFromText(sharedSiteText)
+        if (shortLink != null) showResolveSharedSite(shortLink)
+        else showAddSite(sharedSiteOptions.firstOrNull().orEmpty(), sharedSiteOptions)
     }
 
     private fun showResolveSharedSite(shortLink: String) {
@@ -942,14 +740,9 @@ class MainActivity : AppCompatActivity() {
                     "Whitelist sites you add still start their $siteWait-minute wait."
         }
 
-        val lockBtn = button(if (lockOn) "Turn Chrome lock OFF (filter password)" else "Turn Chrome lock ON") {
+        val lockBtn = button(if (lockOn) "Turn Chrome lock OFF (task password)" else "Turn Chrome lock ON") {
             if (lockOn) {
-                withFilterPassword("Turn Chrome lock off") {
-                    Policy.setChromeLock(this, false)
-                    back()
-                }
-            } else if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-                goTo { showFilterPasswordSetup() }
+                withTaskPassword(TaskScope(TaskKind.WHITELIST_OFF), "Turn Chrome whitelist off") { Policy.setChromeLock(this, false, it) }
             } else {
                 if (Store.activePatterns(this).isEmpty()) {
                     toast("No active sites yet: Chrome will block everything until one is active.")
@@ -958,8 +751,8 @@ class MainActivity : AppCompatActivity() {
                 reopen()
             }
         }
-        val add = button("Add site (filter password, $siteWait min wait)") {
-            withFilterPassword("Add a site") { swapTo { showAddSite() } }
+        val add = button("Add site (task password, $siteWait min wait)") {
+            goTo { showAddSite() }
         }
         val refresh = button("Refresh") { reopen() }
         val backBtn = button("Back") { back() }
@@ -1022,12 +815,13 @@ class MainActivity : AppCompatActivity() {
                 val s = Store.normalizeSite(site.text.toString())
                 when {
                     s == null -> msg.text = "That doesn't look like a specific site. Use something like example.com."
-                    !Store.addSite(this, s) -> msg.text = "$s is already on the list."
+                    Store.sites(this).any { it.pattern == s } -> msg.text = "$s is already on the list."
                     else -> {
-                        Policy.syncChrome(this)
-                        msg.text = "Added $s. It will be active in $siteWait min."
-                        site.setText("")
-                        choices?.clearCheck()
+                        withTaskPassword(TaskScope(TaskKind.WHITELIST_ADD), "Whitelist only $s") { password ->
+                            TaskPasswords.run(this, TaskScope(TaskKind.WHITELIST_ADD), password) {
+                                Store.addSite(this, s).also { if (it) Policy.syncChrome(this) }
+                            }
+                        }
                     }
                 }
             },
@@ -1103,20 +897,6 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- ordered domain rules ----------
 
-    private fun withDomainRulePassword(title: String, operation: (String) -> Boolean) {
-        if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-            toast("Set the filter password first, then retry this action.")
-            goTo { showFilterPasswordSetup() }
-            return
-        }
-        goTo {
-            showCredentialGate(title, Store.Pw.FILTER, operation) {
-                Policy.sweep(this)
-                back()
-            }
-        }
-    }
-
     private fun showDomainRules() {
         val rules = Store.domainRules(this)
         fun choices(titles: List<String>) = Spinner(this).apply {
@@ -1150,7 +930,7 @@ class MainActivity : AppCompatActivity() {
                     "If no rule matches, this filter allows the domain. Higher position means a smaller number."),
             label("Example: #1 Block domains containing manga, #2 Allow suffix .org: manga.org is blocked. " +
                     "Move Allow .org to #1 and manga.org passes this filter."),
-            section("Add a domain rule", "Block instantly; Allow requires the filter password",
+            section("Add a domain rule", "Block instantly; Allow requires the task password",
                 label("Action"), action, label("Match type"), type, value,
                 label("Contains checks the hostname only. Suffix .org includes all .org domains; " +
                         "example.org includes that domain and its subdomains. Exact matches only the named domain."),
@@ -1163,7 +943,7 @@ class MainActivity : AppCompatActivity() {
                         normalized == null -> msg.text = "Enter hostname text, a domain, or a suffix such as .org. Do not include a URL, path, or spaces."
                         target == null || target !in 1..rules.size + 1 -> msg.text = "Enter a position from 1 to ${rules.size + 1}."
                         rules.any { it.action == selectedAction && it.type == selectedType && it.value == normalized } -> msg.text = "This rule already exists. Change its position below."
-                        selectedAction == DomainAction.ALLOW -> withDomainRulePassword("Add Allow rule") { password ->
+                        selectedAction == DomainAction.ALLOW -> withTaskPassword(TaskScope(TaskKind.DOMAIN_ALLOW), "Add Allow rule") { password ->
                             Store.addDomainRule(this, selectedAction, selectedType, normalized, target, password)
                         }
                         else -> {
@@ -1178,11 +958,11 @@ class MainActivity : AppCompatActivity() {
         )
         if (rules.isEmpty()) views.add(label("No domain rules yet."))
         rules.forEachIndexed { index, rule ->
-            fun moveTo(target: Int) = withDomainRulePassword("Move rule to position $target") { password ->
+            fun moveTo(target: Int) = withTaskPassword(TaskScope(TaskKind.DOMAIN_MOVE), "Move rule to position $target") { password ->
                 Store.moveDomainRule(this, rule.id, target, password)
             }
             val controls = mutableListOf<View>(label(rule.description),
-                button("Change position (filter password)") {
+                button("Change position (task password)") {
                     val field = positionField(index + 1)
                     val dialog = MaterialAlertDialogBuilder(this).setTitle("Position for ${rule.value}")
                         .setMessage("Choose 1 to ${rules.size}. Position 1 runs first.").setView(field)
@@ -1196,10 +976,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     dialog.show()
                 })
-            if (index > 0) controls.add(button("Move up (filter password)") { moveTo(index) })
-            if (index < rules.lastIndex) controls.add(button("Move down (filter password)") { moveTo(index + 2) })
-            controls.add(button(if (rule.action == DomainAction.BLOCK) "Remove rule (filter password)" else "Remove Allow rule") {
-                if (rule.action == DomainAction.BLOCK) withDomainRulePassword("Remove Block rule") { password ->
+            if (index > 0) controls.add(button("Move up (task password)") { moveTo(index) })
+            if (index < rules.lastIndex) controls.add(button("Move down (task password)") { moveTo(index + 2) })
+            controls.add(button(if (rule.action == DomainAction.BLOCK) "Remove rule (task password)" else "Remove Allow rule") {
+                if (rule.action == DomainAction.BLOCK) withTaskPassword(TaskScope(TaskKind.DOMAIN_REMOVE), "Remove Block rule") { password ->
                     Store.removeDomainRule(this, rule.id, password)
                 } else {
                     Store.removeDomainRule(this, rule.id)
@@ -1225,7 +1005,7 @@ class MainActivity : AppCompatActivity() {
                     "Browser address-bar support depends on the browser."),
             label("Allow passes only this domain filter. Chrome whitelist, extra site locks, Google DNS blocklist, " +
                     "keyword filtering and app locks still apply. Paths and search terms are not domain names."),
-            label("Adding Block rules is immediate. Adding Allow rules, removing Block rules, and reordering require the filter password. " +
+            label("Adding Block rules is immediate. Adding Allow rules, removing Block rules, and reordering require the task password. " +
                     "While any rules exist, disabling accessibility locks browsers and Google."),
             label("Accessibility service: " + if (BrowserKeywordService.isReady(this)) "running" else "not running"),
             button("Android accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
@@ -1291,22 +1071,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val filterStatus = label(when {
-            !filterOn -> "Keyword filter: OFF (disabled with filter password)."
+            !filterOn -> "Keyword filter: OFF (disabled with task password)."
             !ready -> "Keyword filter: ON. Browsers and the Google app are blocked until the accessibility service is running."
             else -> "Keyword filter: ON. Accessibility service is running."
         })
-        val toggle = button(if (filterOn) "Turn keyword filter OFF (filter password)" else "Turn keyword filter ON") {
+        val toggle = button(if (filterOn) "Turn keyword filter OFF (task password)" else "Turn keyword filter ON") {
             if (Store.browserKeywordFilterEnabled(this)) {
-                if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-                    toast("Set the filter password first, then retry turning the filter off.")
-                    goTo { showFilterPasswordSetup() }
-                } else {
-                    goTo { showCredentialGate("Turn keyword filter off", Store.Pw.FILTER,
-                        { password -> Store.disableBrowserKeywordFilter(this, password) }) {
-                        Policy.sweep(this)
-                        back()
-                    } }
-                }
+                withTaskPassword(TaskScope(TaskKind.KEYWORD_OFF), "Turn keyword filter off") { Store.disableBrowserKeywordFilter(this, it) }
             } else {
                 Store.enableBrowserKeywordFilter(this)
                 Policy.sweep(this)
@@ -1342,7 +1113,7 @@ class MainActivity : AppCompatActivity() {
                         "Detection depends on readable accessibility content. Inspected text stays on this device and is not saved."),
                 label("Enable “${getString(R.string.browser_keyword_service_name)}” in Android accessibility settings. " +
                         "When keyword protection is on, browsers and Google remain locked if the service is off. " +
-                        "Turning protection off requires the filter password. Google also requires the built-in VPN."),
+                        "Turning protection off requires the task password. Google also requires the built-in VPN."),
                 label("Select a blocked word and tap Manage selected word to request or cancel removal. " +
                         "Per-word exceptions allow one blocked word. Generic exceptions allow all keyword matches on that page. " +
                         "Other app and site restrictions still apply.")),
@@ -1358,7 +1129,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showGenericKeywordExceptions() {
         val allowed = EditText(this).apply { hint = "Generic exception word or phrase, e.g. christian" }
-        val password = passwordField("Filter password")
+        val password = passwordField("Add generic page exceptions password")
         val msg = label("")
         val rules = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun drawRules() {
@@ -1379,19 +1150,19 @@ class MainActivity : AppCompatActivity() {
                     "appears on the same visible page, that page is allowed through the keyword filter, " +
                     "even if it contains several blocked words. For example, christian can allow a page " +
                     "containing movie and anime. Matching uses whole words or phrases, regardless of case. " +
-                    "Adding requires the filter password; removing is immediate. " +
+                    "Adding requires the task password; removing is immediate. " +
                     "App locks, accessibility, Google VPN and site restrictions still apply."),
             label("Current generic exceptions", 20f), rules, allowed, msg
         )
-        if (Store.hasPassword(this, Store.Pw.FILTER)) {
+        if (TaskPasswords.ready(this)) {
             views.add(password)
-            views.add(button("Add generic exception (filter password)") {
+            views.add(button("Add generic exception (task password)") {
                 val word = KeywordMatcher.normalizeWord(allowed.text.toString())
                 when {
                     word == null -> msg.text = "Use 1-80 characters: letters, numbers, spaces, apostrophes or hyphens."
                     word in Store.genericKeywordExceptions(this) -> msg.text = "This exception already exists."
-                    Store.lockoutRemainingMs(this, Store.Pw.FILTER) > 0 -> msg.text = "Too many attempts. Try again later."
-                    !Store.addGenericKeywordException(this, word, password.text.toString()) -> msg.text = "Wrong filter password."
+                    TaskPasswords.remaining(this, TaskScope(TaskKind.PAGE_EXCEPTION)) > 0 -> msg.text = "Too many attempts. Try again later."
+                    !Store.addGenericKeywordException(this, word, password.text.toString()) -> msg.text = "Wrong task password."
                     else -> {
                         allowed.setText("")
                         password.setText("")
@@ -1401,7 +1172,7 @@ class MainActivity : AppCompatActivity() {
                 }
             })
         } else {
-            views.add(button("Set filter password to add exceptions") { goTo { showFilterPasswordSetup() } })
+            views.add(button("Set task password to add exceptions") { goTo { showTaskPasswords() } })
         }
         views.add(button("Refresh") { reopen() })
         views.add(button("Back") { back() })
@@ -1423,7 +1194,7 @@ class MainActivity : AppCompatActivity() {
             setSelection(words.indexOf(initialWord).coerceAtLeast(0))
         }
         val allowed = EditText(this).apply { hint = "Exception word or phrase, e.g. christian" }
-        val password = passwordField("Filter password")
+        val password = passwordField("Add per-word exceptions password")
         val msg = label("")
         val rules = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun drawRules() {
@@ -1450,15 +1221,15 @@ class MainActivity : AppCompatActivity() {
                     "Example: movie → christian allows movie when christian also appears. " +
                     "Any one exception for that blocked word is enough. Other blocked words are still checked. " +
                     "Matching uses whole words or phrases, regardless of case. " +
-                    "Adding an exception requires the filter password; removing one is immediate. " +
+                    "Adding an exception requires the task password; removing one is immediate. " +
                     "App locks, accessibility requirements, the Google VPN requirement and site restrictions still apply."),
             label("Blocked word"), selected,
             label("Current exceptions", 20f), rules,
             allowed, msg
         )
-        if (Store.hasPassword(this, Store.Pw.FILTER)) {
+        if (TaskPasswords.ready(this)) {
             views.add(password)
-            views.add(button("Add exception (filter password)") {
+            views.add(button("Add exception (task password)") {
                 val blocked = words.getOrNull(selected.selectedItemPosition) ?: return@button
                 val exception = KeywordMatcher.normalizeWord(allowed.text.toString())
                 when {
@@ -1466,8 +1237,8 @@ class MainActivity : AppCompatActivity() {
                     exception == blocked -> msg.text = "Choose a different word from the blocked word."
                     blocked !in Store.browserKeywords(this) -> msg.text = "This blocked word has been removed. Tap Refresh."
                     exception in Store.keywordExceptions(this)[blocked].orEmpty() -> msg.text = "This exception already exists."
-                    Store.lockoutRemainingMs(this, Store.Pw.FILTER) > 0 -> msg.text = "Too many attempts. Try again later."
-                    !Store.addKeywordException(this, blocked, exception, password.text.toString()) -> msg.text = "Wrong filter password."
+                    TaskPasswords.remaining(this, TaskScope(TaskKind.WORD_EXCEPTION)) > 0 -> msg.text = "Too many attempts. Try again later."
+                    !Store.addKeywordException(this, blocked, exception, password.text.toString()) -> msg.text = "Wrong task password."
                     else -> {
                         allowed.setText("")
                         password.setText("")
@@ -1477,7 +1248,7 @@ class MainActivity : AppCompatActivity() {
                 }
             })
         } else {
-            views.add(button("Set filter password to add exceptions") { goTo { showFilterPasswordSetup() } })
+            views.add(button("Set task password to add exceptions") { goTo { showTaskPasswords() } })
         }
         views.add(button("Refresh") { reopen() })
         views.add(button("Back") { back() })
@@ -1487,203 +1258,295 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- password-protected timing settings ----------
 
-    private fun openSettings() {
-        settingsAuthed = false
-        goTo {
-            if (Store.hasPassword(this, Store.Pw.SETTINGS)) {
-                showSettingsGate()
-            } else if (authed) {
-                showSetSettingsPassword()
-            } else {
-                showPasswordGate("Set up settings password", Store.Pw.MAIN) {
-                    swapTo { showSetSettingsPassword() }
-                }
-            }
-        }
-    }
-
-    private fun showSettingsGate() {
-        showPasswordGate("Settings", Store.Pw.SETTINGS) {
-            settingsAuthed = true
-            swapTo { showSettings() }
-        }
-    }
-
-    private fun showSetSettingsPassword() {
-        val p1 = passwordField("New settings password")
-        val p2 = passwordField("Confirm settings password")
-        val msg = label("")
-        screen(
-            label("Set settings password", 22f),
-            label("This separate password protects durations and time limits. " +
-                    "Use at least 8 characters, including a letter and a number."),
-            p1, p2, msg,
-            button("Save password") {
-                val value = p1.text.toString()
-                when {
-                    Store.hasPassword(this, Store.Pw.SETTINGS) -> {
-                        settingsAuthed = false
-                        swapTo { showSettingsGate() }
-                    }
-                    !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
-                    value != p2.text.toString() -> msg.text = "Passwords don't match."
-                    else -> {
-                        Store.setPassword(this, value, Store.Pw.SETTINGS)
-                        settingsAuthed = true
-                        swapTo { showSettings() }
-                    }
-                }
-            },
-            button("Cancel") { back() }
-        )
-    }
+    private fun openSettings() { goTo { showSettings() } }
 
     private fun showSettings() {
-        if (!settingsAuthed) {
-            swapTo { showSettingsGate() }
-            return
-        }
         val config = Store.timingConfig(this)
-        val fields = TimingOption.entries.associateWith { option ->
-            EditText(this).apply {
-                inputType = InputType.TYPE_CLASS_NUMBER
-                hint = option.title
-                setText(config[option].toString())
+        val fields = TimingOption.entries.associateWith { option -> EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER; setText(config[option].toString()); hint = option.title
+        } }
+        val presets = EditText(this).apply { setText(config.unlockPresets.joinToString(", ")); hint = "Unlock presets in minutes" }
+        val boxes = PlayInstallCategory.entries.associateWith { category -> CheckBox(this).apply {
+            text = category.title; minHeight = dp(48); isChecked = category.storeId in Store.immediatePlayCategories(this@MainActivity)
+        } }
+        val msg = errorLabel()
+        fun timingViews(options: List<TimingOption>) = options.flatMap { listOf(label("${it.title} (${it.unit})"), fields.getValue(it)) }.toTypedArray()
+        fun save(security: Boolean) {
+            val chosen = TimingOption.entries.filter { (it in TaskSettings.security) == security }
+            val invalid = chosen.firstOrNull { fields.getValue(it).text.toString().toIntOrNull() !in it.minimum..it.maximum }
+            val shortcutValues = if (security) null else presets.text.toString().split(',').map { it.trim().toIntOrNull() }
+            if (invalid != null) { fields.getValue(invalid).error = "Enter ${invalid.minimum} to ${invalid.maximum}."; reveal(fields.getValue(invalid)); return }
+            if (shortcutValues?.any { it == null } == true) { presets.error = "Enter whole minutes separated by commas."; return }
+            val changes = chosen.associateWith { fields.getValue(it).text.toString().toInt() }
+            val shortcut = shortcutValues?.filterNotNull()
+            val validation = TimingConfig(TimingOption.entries.associateWith { changes[it] ?: config[it] }, shortcut ?: config.unlockPresets).validationError()
+            if (validation != null) { msg.text = validation; return }
+            withTaskPassword(TaskScope(if (security) TaskKind.SECURITY else TaskKind.TIMING), if (security) "Save password security settings" else "Save timing settings") {
+                TaskSettings.save(this, changes, shortcut, security, it)
             }
         }
-        val presets = EditText(this).apply {
-            hint = "For example: 15, 30, 60, 120"
-            inputType = InputType.TYPE_CLASS_TEXT
-            setText(config.unlockPresets.joinToString(", "))
-        }
-        val savedCategories = Store.immediatePlayCategories(this)
-        val categoryBoxes = PlayInstallCategory.entries.associateWith { category ->
-            CheckBox(this).apply {
-                text = category.title
-                textSize = 16f
-                minHeight = dp(48)
-                isChecked = category.storeId in savedCategories
-            }
-        }
-        val categorySummary = label("")
-        fun updateCategorySummary() {
-            categorySummary.text = "${categoryBoxes.values.count { it.isChecked }} of ${categoryBoxes.size} categories selected. " +
-                    "Changes apply when you tap Save settings."
-        }
-        categoryBoxes.values.forEach { it.setOnCheckedChangeListener { _, _ -> updateCategorySummary() } }
-        updateCategorySummary()
-        fun timingViews(vararg options: TimingOption): Array<View> = options.flatMap { option ->
-            listOf(label("${option.title} (${option.unit}, ${option.minimum}-${option.maximum})"), fields.getValue(option))
-        }.toTypedArray()
-        val msg = label("")
-        val views = mutableListOf<View>(
-            label("Settings", 22f),
-            label("Protected by your settings password. Expand a section, make changes, then Save settings."),
-            section("Play Store immediate access", "Choose categories that skip the new-app wait",
-                categorySummary,
-                label("Only apps installed from Google Play qualify. The category must be verified online first. " +
-                        "Unselected or unverified apps keep the normal wait. Other locks and filters still apply."),
-                section("App categories", "Music, finance, shopping and other app types",
-                    *categoryBoxes.filterKeys { !it.isGame }.values.toTypedArray()),
-                section("Game categories", "Individual game genres",
-                    *categoryBoxes.filterKeys { it.isGame }.values.toTypedArray()),
-                button("Clear category selection") { categoryBoxes.values.forEach { it.isChecked = false } },
-                button("Use default categories") {
-                    categoryBoxes.forEach { (category, box) -> box.isChecked = category.storeId in PlayCategoryRules.defaultCategories }
+        screen(label("Settings", 22f),
+            label("Viewing settings is free. Each Save button asks for that task's password once. It does not unlock any other settings."),
+            section("Play Store immediate access", "Separate category-settings password",
+                label("Verified apps in selected categories skip the installation wait. Other locks still apply."),
+                section("App categories", "Choose app types", *boxes.filterKeys { !it.isGame }.values.toTypedArray()),
+                section("Game categories", "Choose game genres", *boxes.filterKeys { it.isGame }.values.toTypedArray()),
+                primaryButton("Save category choices") {
+                    val selected = boxes.filterValues { it.isChecked }.keys.map { it.storeId }.toSet()
+                    withTaskPassword(TaskScope(TaskKind.CATEGORIES), "Save Play Store categories") { TaskSettings.categories(this, selected, it) }
                 }),
-            section("Install waiting period", "Default delay for newly installed apps",
-                *timingViews(TimingOption.INSTALL_WAIT)),
-            section("Websites & keywords", "Whitelist activation and blocked-word removal waits",
-                *timingViews(TimingOption.SITE_WAIT, TimingOption.KEYWORD_REMOVAL_WAIT),
-                label("Extra locked sites always use a fixed 45-minute removal wait.")),
-            section("Unlock durations", "Temporary unlock limits and shortcut buttons",
-                *timingViews(TimingOption.DEFAULT_UNLOCK, TimingOption.MAX_UNLOCK),
-                label("Unlock button presets (1-6 different durations in minutes, separated by commas)"), presets),
-            section("Protection timing", "Curbox, background checks and network timeouts",
-                *timingViews(TimingOption.CURBOX_GRACE, TimingOption.POLICY_INTERVAL, TimingOption.UNINSTALL_RETRY,
-                    TimingOption.DNS_TIMEOUT, TimingOption.CHROME_RESTART)),
-            section("Password security", "Failed attempts and lockout durations",
-                *timingViews(TimingOption.PASSWORD_FAILURES, TimingOption.LOCKOUT_INITIAL, TimingOption.LOCKOUT_MAX)),
-            section("When changes take effect", "How saved settings affect existing timers",
-                label("Install and whitelist waits are recalculated from the original install/add times. " +
-                        "Play category changes apply to installed apps still within their install wait. " +
-                        "An active unlock is capped to the new maximum. Existing password lockouts keep their end times. " +
-                        "Keyword removal requests keep their scheduled deadlines; their delay setting applies to new requests."))
-        )
-        views.add(msg)
-        views.add(primaryButton("Save settings") {
-            if (settingsAuthed) {
-                val values = fields.mapValues { it.value.text.toString().trim().toIntOrNull() }
-                val invalid = values.entries.firstOrNull { (option, value) ->
-                    value == null || value !in option.minimum..option.maximum
-                }
-                val presetValues = presets.text.toString().split(',').map { it.trim().toIntOrNull() }
-                if (invalid != null) {
-                    val option = invalid.key
-                    fields.getValue(option).error = "Enter ${option.minimum} to ${option.maximum} ${option.unit}."
-                    reveal(fields.getValue(option))
-                    msg.text = "Check ${option.title.lowercase()}."
-                } else if (presetValues.any { it == null }) {
-                    presets.error = "Enter whole minutes separated by commas."
-                    reveal(presets)
-                    msg.text = "Check the unlock presets."
-                } else {
-                    val updated = TimingConfig(values.mapValues { it.value!! }, presetValues.filterNotNull())
-                    val error = updated.validationError()
-                    if (error != null) {
-                        msg.text = error
-                        reveal(when {
-                            updated[TimingOption.DEFAULT_UNLOCK] > updated[TimingOption.MAX_UNLOCK] -> fields.getValue(TimingOption.DEFAULT_UNLOCK)
-                            updated[TimingOption.LOCKOUT_INITIAL] > updated[TimingOption.LOCKOUT_MAX] -> fields.getValue(TimingOption.LOCKOUT_INITIAL)
-                            else -> presets
-                        })
-                    } else {
-                        Store.saveTimingConfig(this, updated)
-                        Store.saveImmediatePlayCategories(this, categoryBoxes.filterValues { it.isChecked }.keys.map { it.storeId }.toSet())
-                        Policy.sweep(this)
-                        LockService.start(this)
-                        msg.text = "Settings saved."
+            section("Durations and waiting periods", "Timing password only; app-specific limits also apply",
+                *timingViews(TimingOption.entries.filterNot { it in TaskSettings.security }),
+                label("Unlock presets"), presets,
+                label("An app's own access limit still applies even if you increase the global maximum. Extra locked sites keep their fixed 45-minute removal wait."),
+                button("Fill default timing values") {
+                    TimingOption.entries.filterNot { it in TaskSettings.security }.forEach { fields.getValue(it).setText(it.default.toString()) }
+                    presets.setText(TimingConfig().unlockPresets.joinToString(", "))
+                }, primaryButton("Save timing settings") { save(false) }),
+            section("Password security", "Separate security-settings password",
+                *timingViews(TaskSettings.security.toList()),
+                button("Fill default security values") { TaskSettings.security.forEach { fields.getValue(it).setText(it.default.toString()) } },
+                primaryButton("Save password security settings") { save(true) }),
+            msg, button("Task passwords") { goTo { showTaskPasswords() } }, button("Back") { back() })
+    }
+
+    private fun taskName(scope: TaskScope): String = if (scope.app.isEmpty()) scope.kind.title else {
+        val name = try { packageManager.getApplicationInfo(scope.app, 0).loadLabel(packageManager).toString() }
+            catch (_: Exception) { scope.app }
+        "${scope.kind.title}: $name"
+    }
+
+    private fun taskJob(msg: TextView, work: () -> String?, success: () -> Unit) {
+        if (credentialJob?.isDone == false) { msg.text = "Please wait for the current operation."; return }
+        val generation = ++credentialGeneration
+        msg.text = "Checking and saving. Please wait."
+        credentialJob = credentialExecutor.submit {
+            val error = try { work() } catch (_: Exception) { "Could not complete the operation. Please try again." }
+            runOnUiThread {
+                if (generation == credentialGeneration) {
+                    credentialJob = null
+                    if (msg.isAttachedToWindow && !isFinishing && !isDestroyed) {
+                        if (error == null) success() else msg.text = error
                     }
                 }
             }
-        })
-        views.add(button("Use default values") {
-            if (settingsAuthed) {
-                val defaults = TimingConfig()
-                fields.forEach { (option, field) -> field.setText(defaults[option].toString()); field.error = null }
-                presets.setText(defaults.unlockPresets.joinToString(", "))
-                categoryBoxes.forEach { (category, box) -> box.isChecked = category.storeId in PlayCategoryRules.defaultCategories }
-                msg.text = "Defaults filled in. Tap Save settings to apply them."
+        }
+    }
+
+    private fun withTaskPassword(scope: TaskScope, title: String, operation: (String) -> Boolean) {
+        if (!TaskPasswords.ready(this)) { goTo { showTaskSetup() }; return }
+        if (!TaskPasswords.has(this, scope)) {
+            if (scope.kind.perApp) goTo { showNewAppPasswords(scope.app) }
+            else toast("This task has no password. Open Task passwords to check setup.")
+            return
+        }
+        goTo {
+            val password = passwordField("Password for ${taskName(scope)}")
+            val msg = errorLabel()
+            screen(label(title, 22f), label("Required task: ${taskName(scope)}. This authorizes only this operation."),
+                password, msg, primaryButton("Confirm this task") {
+                    val entered = password.text.toString()
+                    if (entered.isBlank()) msg.text = "Enter password"
+                    else if (TaskPasswords.remaining(this, scope) > 0) msg.text = "This task is locked out. Try again in ${(TaskPasswords.remaining(this, scope) + 59_999) / 60_000} min."
+                    else {
+                        password.setText("")
+                        taskJob(msg, { if (operation(entered)) null else "Wrong task password, invalid operation, or the task is locked out." }) {
+                            Policy.sweep(this)
+                            back()
+                        }
+                    }
+                }, button("Cancel") { back() })
+        }
+    }
+
+    private fun showTaskSetup() {
+        if (TaskPasswords.ready(this)) { showTaskPasswords(); return }
+        val oldFields = Store.Pw.entries.filter { Store.hasPassword(this, it) }.associateWith {
+            passwordField("Current ${it.name.lowercase().replace('_', '-')} password")
+        }
+        val scopes = TaskPasswords.required(this)
+        val fields = scopes.associateWith { passwordField("New password for this task") to passwordField("Confirm new password") }
+        val limits = scopes.filter { it.kind == TaskKind.APP_UNLOCK }.associateWith {
+            EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; setText("15"); hint = "Maximum minutes per unlock" }
+        }
+        val sharing = CheckBox(this).apply { text = "I deliberately want tasks with matching passwords to share that password" }
+        val msg = errorLabel()
+        val views = mutableListOf<View>(label("Set up task passwords", 22f),
+            label("One-time upgrade. Existing restrictions stay active. Enter your old passwords, then choose a password for every task below. " +
+                "Old filter, settings and app-lock passwords are retired together when setup completes. The main password will open only the dashboard. " +
+                "Existing temporary unlocks end during this upgrade."),
+            section("Verify existing passwords", "All currently configured passwords are required", *oldFields.values.toTypedArray(), initiallyExpanded = true))
+        for (scope in scopes) {
+            val pair = fields.getValue(scope)
+            val children = mutableListOf<View>(pair.first, pair.second)
+            limits[scope]?.let { children.add(label("Maximum access per operation (minutes)")); children.add(it) }
+            views.add(section(taskName(scope), "Choose a new password for this task only", *children.toTypedArray()))
+        }
+        views.addAll(listOf(sharing, msg, primaryButton("Save all task passwords") {
+            val mismatch = fields.entries.firstOrNull { it.value.first.text.toString() != it.value.second.text.toString() ||
+                !Store.isValidNewPassword(it.value.first.text.toString()) }
+            val invalidLimit = limits.entries.firstOrNull { it.value.text.toString().toIntOrNull() !in 1..10080 }
+            when {
+                oldFields.values.any { it.text.isBlank() } -> { msg.text = "Enter every current password."; reveal(oldFields.values.first { it.text.isBlank() }) }
+                mismatch != null -> { msg.text = "Check ${taskName(mismatch.key)}: matching passwords need 8+ characters, a letter and a number."; reveal(mismatch.value.first) }
+                invalidLimit != null -> { msg.text = "Choose an access limit from 1 to 10080 minutes."; reveal(invalidLimit.value) }
+                else -> {
+                    val legacy = oldFields.mapValues { it.value.text.toString() }
+                    val items = scopes.map { NewTaskPassword(it, fields.getValue(it).first.text.toString(), limits[it]?.text?.toString()?.toIntOrNull()) }
+                    val share = sharing.isChecked
+                    taskJob(msg, { TaskPasswords.migrate(this, legacy, items, share) }) {
+                        oldFields.values.forEach { it.setText("") }
+                        fields.values.forEach { it.first.setText(""); it.second.setText("") }
+                        Policy.sweep(this)
+                        toast("Task passwords saved. Old broad task passwords are retired.")
+                        swapTo { showTaskPasswords() }
+                    }
+                }
             }
-        })
-        views.add(button("Change settings password") { goTo { showChangeSettingsPassword() } })
-        views.add(button("Back") { settingsAuthed = false; back() })
+        }, button("Back") { back() }))
         screen(*views.toTypedArray())
     }
 
-    private fun showChangeSettingsPassword() {
-        if (!settingsAuthed) { back(); return }
-        val old = passwordField("Current settings password")
-        val p1 = passwordField("New settings password")
-        val p2 = passwordField("Confirm settings password")
-        val msg = label("")
-        screen(
-            label("Change settings password", 22f), old, p1, p2, msg,
-            button("Save password") {
-                if (settingsAuthed) {
-                    val which = Store.Pw.SETTINGS
-                    val value = p1.text.toString()
-                    when {
-                        Store.lockoutRemainingMs(this, which) > 0 -> msg.text = "Too many attempts. Try again later."
-                        !Store.checkPassword(this, old.text.toString(), which) -> msg.text = "Current settings password is wrong."
-                        !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
-                        value != p2.text.toString() -> msg.text = "Passwords don't match."
-                        else -> { Store.setPassword(this, value, which); back() }
-                    }
+    private fun showTaskPasswords() {
+        if (!TaskPasswords.ready(this)) { showTaskSetup(); return }
+        val views = mutableListOf<View>(label("Task passwords", 22f),
+            label("Each password works for one task. There is no master override or password reset using the main password. " +
+                "Changing a task password requires its current password. Sharing happens only if you explicitly allow matching passwords."),
+            button("Temporary app access") { goTo { showAppAccess() } })
+        val scopes = (TaskPasswords.scopes(this) + TaskPasswords.required(this)).sortedBy { taskName(it) }
+        for (scope in scopes) {
+            if (TaskPasswords.has(this, scope)) views.add(section(taskName(scope), "Password configured",
+                button("Change only this password") { goTo { showTaskPasswordEditor(scope) } }))
+        }
+        Store.protectedApps(this).filter { !TaskPasswords.has(this, TaskScope(TaskKind.APP_UNLOCK, it)) }.forEach { app ->
+            views.add(button("Set up app passwords: ${taskName(TaskScope(TaskKind.APP_UNLOCK, app))}") { goTo { showNewAppPasswords(app) } })
+        }
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
+    }
+
+    private fun showTaskPasswordEditor(scope: TaskScope) {
+        val old = passwordField("Current password for this task")
+        val password = passwordField("New password")
+        val confirm = passwordField("Confirm new password")
+        val share = CheckBox(this).apply { text = "Use a chosen password. I explicitly accept sharing if it matches another credential" }
+        val show = CheckBox(this).apply {
+            text = "Show new password"
+            setOnCheckedChangeListener { _, visible ->
+                password.transformationMethod = if (visible) null else android.text.method.PasswordTransformationMethod.getInstance()
+                confirm.transformationMethod = if (visible) null else android.text.method.PasswordTransformationMethod.getInstance()
+            }
+        }
+        val msg = errorLabel()
+        screen(label(taskName(scope), 22f), label("Change only this task's password. The main password cannot reset it."),
+            old, label("Generate a separate password, or explicitly enable a chosen password. Save it somewhere safe before confirming."),
+            button("Generate a separate password") { val value = TaskVault.generatePassword(scope); password.setText(value); confirm.setText(value) },
+            password, confirm, show, share, msg, primaryButton("Change this password") {
+                val before = old.text.toString()
+                val next = password.text.toString()
+                val shared = share.isChecked
+                if (before.isBlank()) msg.text = "Enter current task password"
+                else if (next != confirm.text.toString()) msg.text = "Passwords do not match."
+                else taskJob(msg, { TaskPasswords.change(this, scope, before, next, shared) }) { back() }
+            }, button("Back") { back() })
+    }
+
+    private fun showNewAppPasswords(app: String) {
+        if (!TaskPasswords.ready(this)) { showTaskSetup(); return }
+        val scopes = TaskScope.appTasks(app)
+        if (scopes.any { TaskPasswords.has(this, it) }) { showTaskPasswords(); return }
+        val fields = scopes.associateWith { passwordField("New task password") to passwordField("Confirm task password") }
+        val limit = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; hint = "Maximum minutes per unlock"; setText("15") }
+        val enrollment = passwordField("New app password-setup credential")
+        val sharing = CheckBox(this).apply { text = "Use chosen passwords. I explicitly accept sharing if they match other credentials" }
+        val show = CheckBox(this).apply {
+            text = "Show new passwords"
+            setOnCheckedChangeListener { _, visible -> fields.values.forEach {
+                it.first.transformationMethod = if (visible) null else android.text.method.PasswordTransformationMethod.getInstance()
+                it.second.transformationMethod = if (visible) null else android.text.method.PasswordTransformationMethod.getInstance()
+            } }
+        }
+        val msg = errorLabel()
+        val views = mutableListOf<View>(label("New app passwords", 22f),
+            label("${taskName(scopes.first())}. Adding a lock was immediate. Setting its first passwords requires the new-app setup credential. " +
+                "This cannot replace existing app passwords. Generate separate passwords, or explicitly enable chosen passwords. Save them before confirming."), enrollment,
+            button("Generate separate app passwords") { fields.forEach { (scope, pair) ->
+                val value = TaskVault.generatePassword(scope); pair.first.setText(value); pair.second.setText(value)
+            } }, show)
+        scopes.forEach { scope -> views.add(section(taskName(scope), "Separate task password", fields.getValue(scope).first, fields.getValue(scope).second)) }
+        views.addAll(listOf(label("Maximum minutes for each temporary unlock"), limit, sharing, msg, primaryButton("Set up this app") {
+            val minutes = limit.text.toString().toIntOrNull()
+            if (fields.values.any { it.first.text.toString() != it.second.text.toString() } || minutes !in 1..10080) msg.text = "Check password confirmations and the access limit."
+            else {
+                val items = scopes.map { NewTaskPassword(it, fields.getValue(it).first.text.toString(), if (it.kind == TaskKind.APP_UNLOCK) minutes else null) }
+                val credential = enrollment.text.toString()
+                val shared = sharing.isChecked
+                taskJob(msg, { TaskPasswords.enroll(this, app, credential, items, shared) }) { back() }
+            }
+        }, button("Back") { back() }))
+        screen(*views.toTypedArray())
+    }
+
+    private fun showAppAccess() {
+        val apps = Store.protectedApps(this).sorted()
+        val selector = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                apps.map { taskName(TaskScope(TaskKind.APP_UNLOCK, it)).substringAfter(": ") })
+        }
+        val minutes = EditText(this).apply { inputType = InputType.TYPE_CLASS_NUMBER; hint = "Minutes"; setText("15") }
+        val shortcuts = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        Store.timingConfig(this).unlockPresets.forEach { duration ->
+            shortcuts.addView(button("$duration min") { minutes.setText(duration.toString()) })
+        }
+        val shortcutScroll = HorizontalScrollView(this).apply { addView(shortcuts); isHorizontalScrollBarEnabled = false }
+        val status = label("")
+        fun selected() = apps.getOrNull(selector.selectedItemPosition)
+        fun update() {
+            val app = selected() ?: return
+            val cap = minOf(TaskPasswords.vault(this).limit(app), Store.timingConfig(this)[TimingOption.MAX_UNLOCK])
+            val until = Store.unlockedUntil(this, app)
+            status.text = "Limit: $cap minutes per operation. " + if (until > System.currentTimeMillis())
+                "Temporarily unlocked until ${DateFormat.getTimeInstance().format(Date(until))}. Other restrictions still apply."
+                else "No temporary access is active. Other restrictions still apply."
+            minutes.setText(minOf(Store.timingConfig(this)[TimingOption.DEFAULT_UNLOCK], cap.coerceAtLeast(1)).toString())
+            Store.timingConfig(this).unlockPresets.forEachIndexed { index, duration -> shortcuts.getChildAt(index).isEnabled = duration <= cap }
+        }
+        selector.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) = update()
+            override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+        }
+        screen(label("Temporary app access", 22f), label("Choose one app. Its access password cannot unlock any other app, remove its lock, or change its time limit."),
+            selector, status, minutes, shortcutScroll,
+            primaryButton("Unlock only the selected app") {
+                val app = selected() ?: return@primaryButton
+                val duration = minutes.text.toString().toIntOrNull()
+                val cap = minOf(TaskPasswords.vault(this).limit(app), Store.timingConfig(this)[TimingOption.MAX_UNLOCK])
+                if (!TaskPasswords.has(this, TaskScope(TaskKind.APP_UNLOCK, app))) goTo { showNewAppPasswords(app) }
+                else if (duration == null || duration !in 1..cap) { minutes.error = "Enter 1 to $cap minutes." }
+                else withTaskPassword(TaskScope(TaskKind.APP_UNLOCK, app), "Unlock only ${taskName(TaskScope(TaskKind.APP_UNLOCK, app)).substringAfter(": ")}") {
+                    Store.unlockApp(this, app, duration, it)
                 }
-            },
-            button("Cancel") { back() }
-        )
+            }, button("Lock selected app now") { selected()?.let { TaskPasswords.lockApp(this, it); Policy.sweep(this); update() } },
+            button("Set up this app's first passwords") { selected()?.let { app -> goTo { showNewAppPasswords(app) } } },
+            button("Change selected app's access limit") { selected()?.let { app -> goTo { showAppLimit(app) } } },
+            button("Task passwords") { goTo { showTaskPasswords() } }, button("Back") { back() })
+        if (apps.isEmpty()) status.text = "No apps are manually locked. Add one in App locks."
+    }
+
+    private fun showAppLimit(app: String) {
+        val field = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(TaskPasswords.vault(this@MainActivity).limit(app).toString())
+        }
+        screen(label(taskName(TaskScope(TaskKind.APP_LIMIT, app)), 22f),
+            label("This app's separate limit password is required. Its temporary-access password cannot change this limit. Global maximum durations also apply."),
+            field, primaryButton("Save limit for this app") {
+                val minutes = field.text.toString().toIntOrNull()
+                if (minutes !in 1..10080) field.error = "Enter 1 to 10080 minutes."
+                else withTaskPassword(TaskScope(TaskKind.APP_LIMIT, app), "Change only this app's access limit") {
+                    TaskPasswords.setLimit(this, app, minutes!!, it)
+                }
+            }, button("Back") { back() })
     }
 
     private fun showAbout() {
@@ -1719,6 +1582,11 @@ class MainActivity : AppCompatActivity() {
     /** Shows [content] padded so it stays clear of the status bar, navigation bar,
      *  camera cutout and keyboard. */
     private fun show(content: View) {
+        if (credentialJob?.isDone == false) {
+            credentialGeneration++
+            credentialJob?.cancel(true)
+            credentialJob = null
+        }
         UiStyle.styleInputs(content)
         val root = FrameLayout(this)
         root.setBackgroundColor(UiStyle.color(this, com.google.android.material.R.attr.colorSurface))
@@ -1780,6 +1648,7 @@ class MainActivity : AppCompatActivity() {
         val v = EditText(this)
         v.hint = hintText
         v.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        v.isSaveEnabled = false
         return v
     }
 

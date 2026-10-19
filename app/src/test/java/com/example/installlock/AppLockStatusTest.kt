@@ -22,7 +22,7 @@ class AppLockStatusTest {
         val text = status(reasons, true).explanation()
         assertTrue(text.startsWith("Chrome is locked because:"))
         assertTrue(text.contains("accessibility setting is disabled"))
-        assertTrue(text.contains("app-lock password"))
+        assertTrue(text.contains("temporary-access password"))
         assertEquals(2, reasons.descriptions().size)
     }
 
@@ -70,7 +70,7 @@ class AppLockStatusTest {
         assertTrue(text.contains("blocks other browsers"))
         assertTrue(text.contains("grace period has ended"))
         assertTrue(text.contains("\"webtoon\""))
-        assertTrue(text.contains("filter password"))
+        assertTrue(text.contains("task password"))
     }
 
     @Test fun googleNeedsItsVpnEvenWithoutAnAppLockOrKeywordRestriction() {

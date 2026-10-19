@@ -84,17 +84,19 @@ class SettingsStoreTest {
     @Test
     fun settingsPersistAndCapAnExistingUnlockWithoutExtendingIt() {
         Store.setLastUnlockMinutes(context, 120)
-        prefs.edit().putLong("unlockedUntil", System.currentTimeMillis() + 120 * 60_000L).commit()
+        val app = "com.android.chrome"
+        assertNull(TaskPasswords.vault(context).install(listOf(NewTaskPassword(TaskScope(TaskKind.APP_UNLOCK, app), "ChromeAccess1", 120)), false))
+        assertTrue(Store.unlockApp(context, app, 120, "ChromeAccess1"))
         val config = TimingConfig(mapOf(TimingOption.MAX_UNLOCK to 10,
             TimingOption.DEFAULT_UNLOCK to 5, TimingOption.SITE_WAIT to 2), listOf(1, 5, 10))
         Store.saveTimingConfig(context, config)
         assertEquals(10, Store.timingConfig(context)[TimingOption.MAX_UNLOCK])
         assertEquals(listOf(1, 5, 10), Store.timingConfig(context).unlockPresets)
         assertEquals(5, Store.lastUnlockMinutes(context))
-        val capped = Store.unlockedUntil(context)
+        val capped = Store.unlockedUntil(context, app)
         assertTrue(capped - System.currentTimeMillis() <= 10 * 60_000L)
         Store.saveTimingConfig(context, TimingConfig())
-        assertEquals(capped, Store.unlockedUntil(context))
+        assertEquals(capped, Store.unlockedUntil(context, app))
     }
 
     @Test

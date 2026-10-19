@@ -34,8 +34,8 @@ class DomainRuleStoreTest {
         assertEquals(DomainAction.BLOCK, DomainRules(Store.domainRules(context)).match("manga.org")!!.rule.action)
     }
 
-    @Test fun allowRulesRequireTheFilterPasswordAndPersistTheirRequestedPosition() {
-        Store.setPassword(context, password, Store.Pw.FILTER)
+    @Test fun allowRulesRequireTheTaskPasswordAndPersistTheirRequestedPosition() {
+        installTaskTestCredentials(context, password, TaskKind.DOMAIN_ALLOW, TaskKind.DOMAIN_MOVE, TaskKind.DOMAIN_REMOVE)
         Store.setPassword(context, "MainPass123", Store.Pw.MAIN)
         Store.setPassword(context, "SettingsPass123", Store.Pw.SETTINGS)
         assertTrue(addBlock())
@@ -49,7 +49,7 @@ class DomainRuleStoreTest {
     }
 
     @Test fun reorderingRequiresAuthenticationAndChangesFirstMatchInBothDirections() {
-        Store.setPassword(context, password, Store.Pw.FILTER)
+        installTaskTestCredentials(context, password, TaskKind.DOMAIN_ALLOW, TaskKind.DOMAIN_MOVE, TaskKind.DOMAIN_REMOVE)
         assertTrue(addBlock())
         assertTrue(Store.addDomainRule(context, DomainAction.ALLOW, DomainMatchType.SUFFIX, "org", 2, password))
         val allow = Store.domainRules(context)[1]
@@ -66,7 +66,7 @@ class DomainRuleStoreTest {
         assertTrue(addBlock())
         val block = Store.domainRules(context).single()
         assertFalse(Store.removeDomainRule(context, block.id))
-        Store.setPassword(context, password, Store.Pw.FILTER)
+        installTaskTestCredentials(context, password, TaskKind.DOMAIN_ALLOW, TaskKind.DOMAIN_MOVE, TaskKind.DOMAIN_REMOVE)
         assertFalse(Store.removeDomainRule(context, block.id, "wrong"))
         assertTrue(Store.addDomainRule(context, DomainAction.ALLOW, DomainMatchType.SUFFIX, "org", 2, password))
         assertTrue(Store.removeDomainRule(context, Store.domainRules(context)[1].id))
@@ -75,12 +75,12 @@ class DomainRuleStoreTest {
     }
 
     @Test fun passwordLockoutPreventsReorderingAndRemovalEvenWithCorrectPassword() {
-        Store.setPassword(context, password, Store.Pw.FILTER)
+        installTaskTestCredentials(context, password, TaskKind.DOMAIN_ALLOW, TaskKind.DOMAIN_MOVE, TaskKind.DOMAIN_REMOVE)
         assertTrue(addBlock())
         assertTrue(addBlock("anime", 2))
         val before = Store.domainRules(context)
-        repeat(5) { Store.checkPassword(context, "wrong", Store.Pw.FILTER) }
-        assertTrue(Store.lockoutRemainingMs(context, Store.Pw.FILTER) > 0)
+        repeat(5) { listOf(TaskKind.DOMAIN_ALLOW, TaskKind.DOMAIN_MOVE, TaskKind.DOMAIN_REMOVE).forEach { TaskPasswords.check(context, TaskScope(it), "wrong") } }
+        assertTrue(TaskPasswords.remaining(context, TaskScope(TaskKind.DOMAIN_MOVE)) > 0)
         assertFalse(Store.moveDomainRule(context, before[1].id, 1, password))
         assertFalse(Store.removeDomainRule(context, before[0].id, password))
         assertFalse(Store.addDomainRule(context, DomainAction.ALLOW, DomainMatchType.SUFFIX, "org", 1, password))

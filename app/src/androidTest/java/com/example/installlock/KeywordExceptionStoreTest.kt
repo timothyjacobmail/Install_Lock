@@ -22,11 +22,11 @@ class KeywordExceptionStoreTest {
     fun cleanUp() { prefs.edit().clear().commit() }
 
     @Test
-    fun addingRequiresTheFilterPasswordAndAnActiveDifferentBlockedWord() {
+    fun addingRequiresTheTaskPasswordAndAnActiveDifferentBlockedWord() {
         Store.addBrowserKeyword(context, "movie")
         assertFalse(Store.addKeywordException(context, "movie", "christian", "FilterPass4"))
         Store.setPassword(context, "MainPass1", Store.Pw.MAIN)
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertFalse(Store.addKeywordException(context, "movie", "christian", "MainPass1"))
         assertFalse(Store.addKeywordException(context, "missing", "christian", "FilterPass4"))
         assertFalse(Store.addKeywordException(context, "movie", "MOVIE", "FilterPass4"))
@@ -39,9 +39,9 @@ class KeywordExceptionStoreTest {
 
     @Test
     fun lockoutPreventsAddingButRemovingIsImmediateWithoutAPassword() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertTrue(Store.addKeywordException(context, "anime", "education", "FilterPass4"))
-        repeat(5) { Store.checkPassword(context, "wrong", Store.Pw.FILTER) }
+        repeat(5) { TaskPasswords.check(context, TaskScope(TaskKind.WORD_EXCEPTION), "wrong"); TaskPasswords.check(context, TaskScope(TaskKind.PAGE_EXCEPTION), "wrong") }
         assertFalse(Store.addKeywordException(context, "anime", "documentary", "FilterPass4"))
         Store.removeKeywordException(context, "anime", "education")
         assertTrue(Store.keywordExceptions(context).isEmpty())
@@ -50,7 +50,7 @@ class KeywordExceptionStoreTest {
 
     @Test
     fun exceptionEditsPreserveTheBlockedWordsRemovalDeadline() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         val deadline = Store.requestKeywordRemoval(context, "anime")!!
         assertTrue(Store.addKeywordException(context, "anime", "education", "FilterPass4"))
         assertEquals(deadline, Store.browserKeywordEntries(context).first { it.word == "anime" }.removeAt)
@@ -60,7 +60,7 @@ class KeywordExceptionStoreTest {
 
     @Test
     fun expiredWordRemovalPrunesItsExceptionsWithoutResurrectingThemOnReadd() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertTrue(Store.addKeywordException(context, "anime", "education", "FilterPass4"))
         assertTrue(Store.addKeywordException(context, "manga", "bible study", "FilterPass4"))
         val deadline = Store.requestKeywordRemoval(context, "anime")!!
@@ -74,11 +74,11 @@ class KeywordExceptionStoreTest {
     }
 
     @Test
-    fun genericExceptionsRequireTheFilterPasswordAndPersistNormalizedWords() {
+    fun genericExceptionsRequireTheTaskPasswordAndPersistNormalizedWords() {
         assertTrue(Store.genericKeywordExceptions(context).isEmpty())
         assertFalse(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
         Store.setPassword(context, "MainPass1", Store.Pw.MAIN)
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertFalse(Store.addGenericKeywordException(context, "christian", "MainPass1"))
         assertFalse(Store.addGenericKeywordException(context, "bad|word", "FilterPass4"))
         assertTrue(Store.addGenericKeywordException(context, " CHRISTIAN ", "FilterPass4"))
@@ -89,9 +89,9 @@ class KeywordExceptionStoreTest {
 
     @Test
     fun genericExceptionsCanBeRemovedDuringPasswordLockoutButCannotBeAdded() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertTrue(Store.addGenericKeywordException(context, "christian", "FilterPass4"))
-        repeat(5) { Store.checkPassword(context, "wrong", Store.Pw.FILTER) }
+        repeat(5) { TaskPasswords.check(context, TaskScope(TaskKind.WORD_EXCEPTION), "wrong"); TaskPasswords.check(context, TaskScope(TaskKind.PAGE_EXCEPTION), "wrong") }
         assertFalse(Store.addGenericKeywordException(context, "education", "FilterPass4"))
         Store.removeGenericKeywordException(context, " CHRISTIAN ")
         assertTrue(Store.genericKeywordExceptions(context).isEmpty())
@@ -99,7 +99,7 @@ class KeywordExceptionStoreTest {
 
     @Test
     fun genericRulesPreservePerWordRulesAndDeadlinesAndSurviveWordRemoval() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.WORD_EXCEPTION, TaskKind.PAGE_EXCEPTION)
         assertTrue(Store.addKeywordException(context, "manga", "bible study", "FilterPass4"))
         val deadline = Store.requestKeywordRemoval(context, "anime")!!
         assertTrue(Store.addGenericKeywordException(context, "christian", "FilterPass4"))

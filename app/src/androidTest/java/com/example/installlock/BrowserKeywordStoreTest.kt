@@ -71,18 +71,18 @@ class BrowserKeywordStoreTest {
     }
 
     @Test
-    fun filterCannotBeDisabledWithoutAnExistingFilterPassword() {
+    fun filterCannotBeDisabledWithoutAnExistingTaskPassword() {
         assertTrue(Store.browserKeywordFilterEnabled(context))
         assertFalse(Store.disableBrowserKeywordFilter(context, "AnyPass1"))
         assertTrue(Store.browserKeywordFilterEnabled(context))
     }
 
     @Test
-    fun onlyFilterPasswordCanTurnOffFilteringAndEnablingNeedsNoPassword() {
+    fun onlyTaskPasswordCanTurnOffFilteringAndEnablingNeedsNoPassword() {
         Store.setPassword(context, "MainPass1", Store.Pw.MAIN)
         Store.setPassword(context, "SettingsPass2", Store.Pw.SETTINGS)
         Store.setPassword(context, "AppLockPass3", Store.Pw.APP_LOCK)
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.KEYWORD_OFF)
         for (password in listOf("MainPass1", "SettingsPass2", "AppLockPass3")) {
             assertFalse(Store.disableBrowserKeywordFilter(context, password))
             assertTrue(Store.browserKeywordFilterEnabled(context))
@@ -95,9 +95,9 @@ class BrowserKeywordStoreTest {
 
     @Test
     fun passwordLockoutCannotBeBypassedWithTheCorrectPasswordButEnablingStillWorks() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.KEYWORD_OFF)
         assertTrue(Store.disableBrowserKeywordFilter(context, "FilterPass4"))
-        repeat(5) { Store.checkPassword(context, "wrong", Store.Pw.FILTER) }
+        repeat(5) { TaskPasswords.check(context, TaskScope(TaskKind.KEYWORD_OFF), "wrong") }
         Store.enableBrowserKeywordFilter(context)
         assertTrue(Store.browserKeywordFilterEnabled(context))
         assertFalse(Store.disableBrowserKeywordFilter(context, "FilterPass4"))
@@ -106,7 +106,7 @@ class BrowserKeywordStoreTest {
 
     @Test
     fun switchingFilterModesPreservesWordsPendingRemovalsAndGuardRecoveryState() {
-        Store.setPassword(context, "FilterPass4", Store.Pw.FILTER)
+        installTaskTestCredentials(context, "FilterPass4", TaskKind.KEYWORD_OFF)
         Store.addBrowserKeyword(context, "extra word")
         val deadline = Store.requestKeywordRemoval(context, "anime")!!
         val guarded = setOf("com.android.chrome", "example.browser")

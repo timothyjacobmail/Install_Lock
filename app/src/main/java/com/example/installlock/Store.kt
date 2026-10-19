@@ -21,8 +21,8 @@ object Store {
         val value = DomainRules.normalizeValue(type, input) ?: return false
         val rules = domainRules(c).toMutableList()
         if (position !in 1..rules.size + 1 || rules.any { it.action == action && it.type == type && it.value == value }) return false
-        if (action == DomainAction.ALLOW && (password == null || !hasPassword(c, Pw.FILTER) ||
-                    !checkPassword(c, password, Pw.FILTER))) return false
+        if (action == DomainAction.ALLOW && (password == null ||
+                    !TaskPasswords.check(c, TaskScope(TaskKind.DOMAIN_ALLOW), password))) return false
         rules.add(position - 1, DomainRule(java.util.UUID.randomUUID().toString(), action, type, value))
         saveDomainRules(c, rules)
         return true
@@ -33,7 +33,7 @@ object Store {
         val rules = domainRules(c).toMutableList()
         val index = rules.indexOfFirst { it.id == id }
         if (index < 0 || position !in 1..rules.size) return false
-        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.DOMAIN_MOVE), password)) return false
         rules.add(position - 1, rules.removeAt(index))
         saveDomainRules(c, rules)
         return true
@@ -43,8 +43,8 @@ object Store {
     internal fun removeDomainRule(c: Context, id: String, password: String? = null): Boolean {
         val rules = domainRules(c)
         val rule = rules.firstOrNull { it.id == id } ?: return false
-        if (rule.action == DomainAction.BLOCK && (password == null || !hasPassword(c, Pw.FILTER) ||
-                    !checkPassword(c, password, Pw.FILTER))) return false
+        if (rule.action == DomainAction.BLOCK && (password == null ||
+                    !TaskPasswords.check(c, TaskScope(TaskKind.DOMAIN_REMOVE), password))) return false
         saveDomainRules(c, rules.filterNot { it.id == id })
         return true
     }
@@ -76,8 +76,8 @@ object Store {
         val last = if (previous[TimingOption.DEFAULT_UNLOCK] != config[TimingOption.DEFAULT_UNLOCK])
             config[TimingOption.DEFAULT_UNLOCK] else lastUnlockMinutes(c)
         edit.putInt("lastUnlockMin", last.coerceIn(1, config[TimingOption.MAX_UNLOCK]))
-        edit.putLong("unlockedUntil", config.capUnlockUntil(unlockedUntil(c), System.currentTimeMillis()))
         edit.apply()
+        TaskPasswords.vault(c).capAll(config[TimingOption.MAX_UNLOCK])
     }
 
     fun lastUnlockMinutes(c: Context): Int {
@@ -144,7 +144,7 @@ object Store {
     /** True if correct. Wrong guesses trigger escalating lockouts. */
     fun checkPassword(c: Context, pw: String, which: Pw = Pw.MAIN): Boolean {
         // Missing input is not a password guess, and some Android crypto providers reject empty keys.
-        if (pw.isBlank()) return false
+        if (pw.isBlank() || !hasPassword(c, which)) return false
         val k = which.prefix
         val prefs = p(c)
         if (lockoutRemainingMs(c, which) > 0) return false
@@ -188,28 +188,28 @@ object Store {
         p(c).getStringSet("protected", DEFAULT_PROTECTED)!!.toSet()
 
     /** Strengthening protection is always allowed and immediately ends any unlock session. */
-    fun addAppLock(c: Context, pkg: String) {
+    fun addAppLock(c: Context, pkg: String) = synchronized(TaskPasswords) {
         p(c).edit().putStringSet("protected", protectedApps(c) + pkg)
             .putLong("unlockedUntil", 0L).apply()
+        TaskPasswords.vault(c).lock(pkg)
     }
 
-    fun removeAppLock(c: Context, pkg: String, password: String): Boolean {
-        if (!hasPassword(c, Pw.APP_LOCK) || !checkPassword(c, password, Pw.APP_LOCK)) return false
+    fun removeAppLock(c: Context, pkg: String, password: String): Boolean = synchronized(TaskPasswords) {
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.APP_REMOVE, pkg), password)) return@synchronized false
         p(c).edit().putStringSet("protected", protectedApps(c) - pkg).apply()
-        return true
+        TaskPasswords.vault(c).lock(pkg)
+        true
     }
 
-    fun unlockedUntil(c: Context) = p(c).getLong("unlockedUntil", 0L)
+    fun unlockedUntil(c: Context, pkg: String = "") = if (pkg.isEmpty()) 0L else TaskPasswords.vault(c).until(pkg)
 
-    fun lockProtectedApps(c: Context) = p(c).edit().putLong("unlockedUntil", 0L).apply()
+    fun lockProtectedApps(c: Context) = synchronized(TaskPasswords) {
+        p(c).edit().putLong("unlockedUntil", 0L).apply()
+        TaskPasswords.scopes(c).filter { it.kind == TaskKind.APP_UNLOCK }.forEach { TaskPasswords.vault(c).lock(it.app) }
+    }
 
-    fun unlockProtectedApps(c: Context, minutes: Int, password: String): Boolean {
-        val config = timingConfig(c)
-        if (minutes !in 1..config[TimingOption.MAX_UNLOCK]) return false
-        if (!hasPassword(c, Pw.APP_LOCK) || !checkPassword(c, password, Pw.APP_LOCK)) return false
-        p(c).edit().putInt("lastUnlockMin", minutes)
-            .putLong("unlockedUntil", System.currentTimeMillis() + minutes * 60_000L).apply()
-        return true
+    fun unlockApp(c: Context, pkg: String, minutes: Int, password: String): Boolean = synchronized(TaskPasswords) {
+        pkg in protectedApps(c) && TaskPasswords.vault(c).unlock(pkg, minutes, timingConfig(c)[TimingOption.MAX_UNLOCK], password)
     }
 
     // ---------- Google app DNS blocklist ----------
@@ -324,7 +324,7 @@ object Store {
 
     /** There is no unauthenticated setter for disabling this protection. */
     fun disableBrowserKeywordFilter(c: Context, password: String): Boolean {
-        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.KEYWORD_OFF), password)) return false
         p(c).edit().putBoolean("keywordFilterEnabled", false).apply()
         return true
     }
@@ -375,7 +375,7 @@ object Store {
     @Synchronized
     fun addGenericKeywordException(c: Context, input: String, password: String): Boolean {
         val word = KeywordMatcher.normalizeWord(input) ?: return false
-        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.PAGE_EXCEPTION), password)) return false
         p(c).edit().putStringSet("genericKeywordExceptions", genericKeywordExceptions(c) + word).apply()
         return true
     }
@@ -403,7 +403,7 @@ object Store {
         val blocked = KeywordMatcher.normalizeWord(blockedInput) ?: return false
         val allowed = KeywordMatcher.normalizeWord(allowedInput) ?: return false
         if (blocked == allowed || blocked !in browserKeywords(c)) return false
-        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.WORD_EXCEPTION), password)) return false
         val saved = p(c).getStringSet("keywordExceptions", emptySet())!!.toSet()
         p(c).edit().putStringSet("keywordExceptions", saved + "$blocked|$allowed").apply()
         return true

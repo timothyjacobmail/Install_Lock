@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.app.AlarmManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -23,12 +24,41 @@ class LockService : Service() {
         override fun onChange(selfChange: Boolean) { Policy.sweep(this@LockService) }
     }
     private var observingAccessibility = false
+    private var scheduledBoundary = 0L
+    private val boundaryAlarm = AlarmManager.OnAlarmListener {
+        scheduledBoundary = 0L
+        handler.removeCallbacks(tick)
+        handler.post(tick)
+    }
+    private val wakeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            scheduledBoundary = 0L
+            handler.removeCallbacks(tick)
+            handler.post(tick)
+        }
+    }
+
+    private fun scheduleBoundary(): Long {
+        val now = System.currentTimeMillis()
+        val next = CurfewRules.nextBoundary(now, CurfewStore.zone(), CurfewStore.appealedNight(this))
+        if (scheduledBoundary != next) {
+            val alarms = getSystemService(AlarmManager::class.java)
+            alarms.cancel(boundaryAlarm)
+            // Listener alarms need no exact-alarm permission. Screen-on reconciles immediately
+            // after Doze, and service/boot restarts recreate this process-owned alarm.
+            alarms.setExact(AlarmManager.RTC_WAKEUP, next, "Install Lock curfew", boundaryAlarm, handler)
+            scheduledBoundary = next
+        }
+        return (next - now).coerceAtLeast(100L)
+    }
 
     private val tick = object : Runnable {
         override fun run() {
             Store.applyDueKeywordRemovals(this@LockService)
             Policy.sweep(this@LockService)
-            handler.postDelayed(this, Store.timingConfig(this@LockService).milliseconds(TimingOption.POLICY_INTERVAL))
+            val untilBoundary = scheduleBoundary()
+            handler.postDelayed(this, minOf(5000L, untilBoundary,
+                Store.timingConfig(this@LockService).milliseconds(TimingOption.POLICY_INTERVAL)))
         }
     }
 
@@ -58,6 +88,12 @@ class LockService : Service() {
             pkgReceiver,
             IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
         )
+        registerReceiver(wakeReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_DATE_CHANGED)
+        })
         try {
             contentResolver.registerContentObserver(
                 Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), false, accessibilityObserver)
@@ -82,6 +118,8 @@ class LockService : Service() {
     override fun onDestroy() {
         handler.removeCallbacks(tick)
         unregisterReceiver(pkgReceiver)
+        unregisterReceiver(wakeReceiver)
+        getSystemService(AlarmManager::class.java).cancel(boundaryAlarm)
         if (observingAccessibility) contentResolver.unregisterContentObserver(accessibilityObserver)
         super.onDestroy()
     }

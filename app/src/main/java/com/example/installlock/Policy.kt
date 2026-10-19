@@ -65,7 +65,7 @@ object Policy {
         reconcile(c, collectStatus = false)
     }
 
-    private fun reconcile(c: Context, collectStatus: Boolean): List<AppLockStatus> {
+    private fun reconcile(c: Context, collectStatus: Boolean, releaseTargets: Set<String> = emptySet()): List<AppLockStatus> {
         if (!isOwner(c)) return emptyList()
         enforceNoUninstall(c)
         val dpm = dpm(c)
@@ -77,7 +77,10 @@ object Policy {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
         )?.activityInfo?.packageName
         val protectedApps = Store.protectedApps(c)
-        val gateClosed = now >= Store.unlockedUntil(c)
+        val installed = pm.getInstalledPackages(0)
+        val curfewTargets = CurfewStore.enroll(c, installed,
+            protectedApps + BrowserPackages.keywordTargets(c) + CURBOX_GUARDED, homePkg, now)
+        val curfewUntil = CurfewRules.blockedUntil(now, CurfewStore.zone(), CurfewStore.appealedNight(c))
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
         val previousKeywordGuard = Store.keywordGuardPackages(c)
         val accessibilityEnabled = BrowserKeywordService.isEnabled(c)
@@ -111,7 +114,7 @@ object Policy {
             curboxDownSince = 0L
         }
 
-        for (pkg in pm.getInstalledPackages(0)) {
+        for (pkg in installed) {
             val info = pkg.applicationInfo ?: continue
             val name = pkg.packageName
             if (name == c.packageName || name == homePkg) continue
@@ -128,7 +131,7 @@ object Policy {
             val isGoogle = name == BrowserPackages.GOOGLE_APP
             // Previously guarded system apps must also be processed so they can be resumed.
             if (isSystem && !isProtected && !isBrowser && !isGuarded &&
-                !keywordPaused && !isGoogle && name !in previousKeywordGuard) {
+                !keywordPaused && !isGoogle && name !in previousKeywordGuard && name !in releaseTargets && name !in curfewTargets) {
                 // Read status without changing policy for unrelated system apps.
                 if (name == CHROME) record(pkg, info, AppLockReasons())
                 continue
@@ -141,13 +144,14 @@ object Policy {
                 keywordServiceMissing = keywordPaused && keywordFilterOn,
                 domainServiceMissing = keywordPaused && domainRulesOn && !keywordFilterOn,
                 accessibilityEnabled = accessibilityEnabled,
-                appLock = isProtected && gateClosed,
+                appLock = isProtected && now >= Store.unlockedUntil(c, name),
                 installWaitUntil = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now,
                     installWaitMs, categoryExemption),
                 otherBrowser = isBrowser,
                 curboxMissing = isGuarded && curboxDown,
                 neverInstallRule = neverRule,
-                googleVpnMissing = isGoogle && googleVpnMissing
+                googleVpnMissing = isGoogle && googleVpnMissing,
+                curfewUntil = curfewUntil.takeIf { name in curfewTargets }
             )
             val shouldLock = reasons.shouldLock
             try {
@@ -242,15 +246,17 @@ object Policy {
             if (dpm.isPackageSuspended(admin, CHROME)) return   // not running; reads policy on next start
             dpm.setPackagesSuspended(admin, arrayOf(CHROME), true)
             Handler(Looper.getMainLooper()).postDelayed({
-                try { dpm.setPackagesSuspended(admin, arrayOf(CHROME), false) } catch (_: Exception) { }
+                release(c, listOf(CHROME))
             }, Store.timingConfig(c).milliseconds(TimingOption.CHROME_RESTART))
         } catch (_: Exception) { }
     }
 
-    fun setChromeLock(c: Context, on: Boolean) {
+    fun setChromeLock(c: Context, on: Boolean, password: String? = null): Boolean {
+        if (!on && !TaskPasswords.check(c, TaskScope(TaskKind.WHITELIST_OFF), password.orEmpty())) return false
         Store.setChromeLock(c, on)
         if (!on) release(c, otherBrowsers(c))   // system browsers aren't un-suspended by sweep
         sweep(c)
+        return true
     }
 
     fun enableGoogleFilter(c: Context): String {
@@ -267,7 +273,8 @@ object Policy {
         }
     }
 
-    fun disableGoogleFilter(c: Context): String {
+    fun disableGoogleFilter(c: Context, password: String): String? {
+        if (!TaskPasswords.check(c, TaskScope(TaskKind.VPN_OFF), password)) return null
         if (!isOwner(c)) return "Not device owner."
         return try {
             dpm(c).setAlwaysOnVpnPackage(admin(c), null, false)
@@ -282,18 +289,13 @@ object Policy {
     /** Immediately unsuspend packages (used when an app is removed from the protected list). */
     fun release(c: Context, packages: Collection<String>) {
         if (!isOwner(c) || packages.isEmpty()) return
-        try {
-            val keywordGuard = if ((Store.browserKeywordFilterEnabled(c) || Store.domainRules(c).isNotEmpty()) && !BrowserKeywordService.isReady(c))
-                BrowserPackages.keywordTargets(c) + Store.keywordGuardPackages(c) else emptySet()
-            val vpnGuard = if (!DnsFilterService.isReady(c)) setOf(BrowserPackages.GOOGLE_APP) else emptySet()
-            val releasable = packages.filter { it !in keywordGuard && it !in vpnGuard }
-            if (releasable.isNotEmpty()) dpm(c).setPackagesSuspended(admin(c), releasable.toTypedArray(), false)
-        } catch (_: Exception) { }
+        reconcile(c, collectStatus = false, releaseTargets = packages.toSet())
     }
     fun isScreenCaptureBlocked(c: Context): Boolean =
         dpm(c).getScreenCaptureDisabled(admin(c))
 
-    fun setScreenCaptureBlocked(c: Context, blocked: Boolean): String {
+    fun setScreenCaptureBlocked(c: Context, blocked: Boolean, password: String? = null): String? {
+        if (!blocked && !TaskPasswords.check(c, TaskScope(TaskKind.SCREENSHOTS_ALLOW), password.orEmpty())) return null
         if (!isOwner(c)) return "Not device owner."
         return try {
             dpm(c).setScreenCaptureDisabled(admin(c), blocked)
