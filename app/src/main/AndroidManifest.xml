@@ -28,6 +28,18 @@
             </intent-filter>
         </activity>
 
+        <activity-alias
+            android:name=".WhitelistShareActivity"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
+            android:label="@string/add_to_chrome_whitelist">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity-alias>
+
         <receiver
             android:name=".AdminReceiver"
             android:exported="true"
@@ -67,6 +79,7 @@
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

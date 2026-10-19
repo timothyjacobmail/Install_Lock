@@ -187,11 +187,6 @@ object Store {
     fun setChromeLock(c: Context, on: Boolean) =
         p(c).edit().putBoolean("chromeLock", on).apply()
 
-    fun chromePushed(c: Context): String? = p(c).getString("chromePushed", null)
-
-    fun setChromePushed(c: Context, s: String?) =
-        p(c).edit().putString("chromePushed", s).apply()
-
     // ---------- unused now, kept so older code still compiles ----------
 
     fun filterHost(c: Context): String = p(c).getString("filterHost", "") ?: ""

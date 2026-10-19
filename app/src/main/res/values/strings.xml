@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">Install Lock</string>
+    <string name="add_to_chrome_whitelist">Add to Chrome whitelist</string>
 </resources>

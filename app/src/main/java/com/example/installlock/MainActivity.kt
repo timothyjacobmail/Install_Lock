@@ -31,6 +31,8 @@ class MainActivity : Activity() {
 
     private val history = ArrayDeque<() -> Unit>()
     private var current: (() -> Unit)? = null
+    private var receivedSiteShare = false
+    private var sharedDomain: String? = null
 
     /** Go forward to a new screen. Back returns to the one we left. */
     private fun goTo(screen: () -> Unit) {
@@ -70,11 +72,14 @@ class MainActivity : Activity() {
 
     /** Back button on screen: previous screen, or the top screen if there isn't one. */
     private fun back() {
-        if (!goBack()) render()
+        if (!goBack()) {
+            if (receivedSiteShare) finish() else render()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        readSharedSite(intent)
         window.setDecorFitsSystemWindows(false)   // consistent edge-to-edge; show() adds the padding
         if (Policy.isOwner(this)) LockService.start(this)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -82,6 +87,20 @@ class MainActivity : Activity() {
                 OnBackInvokedDispatcher.PRIORITY_DEFAULT
             ) { if (!goBack()) finish() }
         }
+    }
+
+    private fun readSharedSite(incoming: Intent) {
+        receivedSiteShare = incoming.action == Intent.ACTION_SEND && incoming.type == "text/plain"
+        sharedDomain = if (receivedSiteShare) {
+            SharedSite.domainFromText(incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
+        } else null
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readSharedSite(intent)
+        render()
     }
 
     @Suppress("OVERRIDE_DEPRECATION", "GestureBackNavigation")
@@ -177,6 +196,7 @@ class MainActivity : Activity() {
                 screen(label("Not set up as device owner yet.\nProvision via QR code (or adb when testing)."))
             }
             !Store.hasPassword(this) -> goTo { showSetPassword() }
+            receivedSiteShare -> goTo { showSharedSite() }
             !authed -> goTo { showLogin() }
             else -> goTo { showDashboard() }
         }
@@ -230,6 +250,7 @@ class MainActivity : Activity() {
                     msg.text = if (w > 0) waitText(w) else "Wrong password."
                 }
             },
+            button("Chrome whitelist") { goTo { showChromeSites() } },
             status,
             button("Lock protected apps now") {
                 Store.setUnlockedUntil(this, 0L)
@@ -284,7 +305,6 @@ class MainActivity : Activity() {
             },
             button("Choose protected apps") { goTo { showAppPicker() } },
             button("Never-install list") { goTo { showNeverInstall() } },
-            button("Chrome whitelist") { goTo { showChromeSites() } },
             button("Google app filter") { goTo { showGoogleFilter() } },
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
                 toast(Policy.setScreenCaptureBlocked(this, !shotsBlocked))
@@ -531,7 +551,7 @@ class MainActivity : Activity() {
         )
     }
 
-    private fun showSetFilterPassword() {
+    private fun showSetFilterPassword(onSaved: (() -> Unit)? = null) {
         val p1 = passwordField("New filter password")
         val p2 = passwordField("Confirm filter password")
         val msg = label("")
@@ -548,7 +568,7 @@ class MainActivity : Activity() {
                     a != p2.text.toString() -> msg.text = "Passwords don't match."
                     else -> {
                         Store.setPassword(this, a, Store.Pw.FILTER)
-                        back()
+                        if (onSaved != null) onSaved() else back()
                     }
                 }
             },
@@ -583,6 +603,15 @@ class MainActivity : Activity() {
     }
 
     // ---------- Chrome whitelist ----------
+
+    private fun showSharedSite() {
+        val openForm = { swapTo { showAddSite(sharedDomain.orEmpty()) } }
+        if (!Store.hasPassword(this, Store.Pw.FILTER)) {
+            showSetFilterPassword(onSaved = openForm)
+        } else {
+            showFilterGate("Add to Chrome whitelist", openForm)
+        }
+    }
 
     private fun showChromeSites() {
         val sites = Store.sites(this)
@@ -651,11 +680,14 @@ class MainActivity : Activity() {
         show(col)
     }
 
-    private fun showAddSite() {
+    private fun showAddSite(initialSite: String = "") {
         val site = EditText(this)
         site.hint = "example.com or example.com/path"
         site.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
-        val msg = label("")
+        site.setText(initialSite)
+        site.setSelection(site.text.length)
+        val msg = label(if (receivedSiteShare && initialSite.isEmpty())
+            "No valid website found in the shared text. Enter the domain below." else "")
         screen(
             label("Add a site", 22f),
             label("It becomes usable in Chrome ${Store.SITE_DELAY_MS / 60_000} minutes after you add it. " +

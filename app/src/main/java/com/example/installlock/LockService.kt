@@ -27,7 +27,10 @@ class LockService : Service() {
 
     // Fires instantly when an app is installed so it's locked before you can open it
     private val pkgReceiver = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, i: Intent) = Policy.sweep(c)
+        override fun onReceive(c: Context, i: Intent) {
+            if (i.data?.schemeSpecificPart == Policy.CHROME) Policy.syncChrome(c, force = true)
+            Policy.sweep(c)
+        }
     }
 
     override fun onCreate() {
@@ -51,7 +54,11 @@ class LockService : Service() {
         handler.post(tick)
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Includes opening Install Lock, boot, and sticky restarts after process death.
+        Policy.syncChrome(this, force = true)
+        return START_STICKY
+    }
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)

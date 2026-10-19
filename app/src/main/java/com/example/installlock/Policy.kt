@@ -9,6 +9,7 @@ import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.os.UserManager
 import android.os.Bundle
+import android.util.Log
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
@@ -169,25 +170,21 @@ object Policy {
             .toSet()
     }
 
-    /** Pushes the active whitelist to Chrome, only when it has changed. */
-    fun syncChrome(c: Context) {
+    /** Reconcile with Android's actual restrictions; a saved "sent" flag can become stale. */
+    fun syncChrome(c: Context, force: Boolean = false) {
         if (!isOwner(c)) return
-        val want: String? =
-            if (Store.chromeLock(c)) Store.activePatterns(c).sorted().joinToString("\n") else null
-        if (want == Store.chromePushed(c)) return
         try {
-            val b = Bundle()
-            if (want != null) {
-                b.putStringArray("URLBlocklist", arrayOf("*"))
-                b.putStringArray(
-                    "URLAllowlist",
-                    want.split("\n").filter { it.isNotEmpty() }.toTypedArray()
-                )
-            }
-            dpm(c).setApplicationRestrictions(admin(c), CHROME, b)
-            Store.setChromePushed(c, want)
+            val manager = dpm(c)
+            val owner = admin(c)
+            val current = manager.getApplicationRestrictions(owner, CHROME)
+            val updated = ChromeRestrictions.update(current, Store.chromeLock(c), Store.activePatterns(c))
+            if (updated == null && !force) return
+            manager.setApplicationRestrictions(owner, CHROME, updated ?: Bundle(current))
             if (RESTART_CHROME_ON_CHANGE) bounceChrome(c)
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            // Leave reconciliation pending: the next service tick will try again.
+            Log.w("InstallLock", "Could not apply Chrome whitelist", e)
+        }
     }
 
     private fun bounceChrome(c: Context) {
