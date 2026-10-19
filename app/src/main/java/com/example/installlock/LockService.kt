@@ -21,7 +21,7 @@ class LockService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             Policy.sweep(this@LockService)
-            handler.postDelayed(this, 5_000)
+            handler.postDelayed(this, Store.timingConfig(this@LockService).milliseconds(TimingOption.POLICY_INTERVAL))
         }
     }
 
@@ -57,6 +57,9 @@ class LockService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Includes opening Install Lock, boot, and sticky restarts after process death.
         Policy.syncChrome(this, force = true)
+        // Re-schedule immediately when settings change; keep exactly one repeating tick.
+        handler.removeCallbacks(tick)
+        handler.post(tick)
         return START_STICKY
     }
 

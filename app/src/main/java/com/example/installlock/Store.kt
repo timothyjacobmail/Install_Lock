@@ -8,12 +8,34 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 object Store {
-    const val UNLOCK_MS = 30 * 60 * 1000L
-    const val SITE_DELAY_MS = 15 * 60 * 1000L
-    /** Longest unlock you can request. Raise or lower this to taste. */
-    const val MAX_UNLOCK_MIN = 120
+    fun timingConfig(c: Context): TimingConfig {
+        val prefs = p(c)
+        val values = TimingOption.entries.associateWith { prefs.getInt("timing_${it.name}", it.default) }
+        val presets = prefs.getString("unlockPresets", "15,30,60,120")!!
+            .split(',').mapNotNull { it.toIntOrNull() }
+        return TimingConfig(values, presets)
+    }
 
-    fun lastUnlockMinutes(c: Context): Int = p(c).getInt("lastUnlockMin", 30)
+    fun saveTimingConfig(c: Context, config: TimingConfig) {
+        require(config.validationError() == null) { config.validationError().orEmpty() }
+        val previous = timingConfig(c)
+        val prefs = p(c)
+        val edit = prefs.edit()
+        // Write every field, including defaults, so reset works with partial maps too.
+        TimingOption.entries.forEach { edit.putInt("timing_${it.name}", config[it]) }
+        edit.putString("unlockPresets", config.unlockPresets.joinToString(","))
+        val last = if (previous[TimingOption.DEFAULT_UNLOCK] != config[TimingOption.DEFAULT_UNLOCK])
+            config[TimingOption.DEFAULT_UNLOCK] else lastUnlockMinutes(c)
+        edit.putInt("lastUnlockMin", last.coerceIn(1, config[TimingOption.MAX_UNLOCK]))
+        edit.putLong("unlockedUntil", config.capUnlockUntil(unlockedUntil(c), System.currentTimeMillis()))
+        edit.apply()
+    }
+
+    fun lastUnlockMinutes(c: Context): Int {
+        val config = timingConfig(c)
+        return p(c).getInt("lastUnlockMin", config[TimingOption.DEFAULT_UNLOCK])
+            .coerceIn(1, config[TimingOption.MAX_UNLOCK])
+    }
 
     fun setLastUnlockMinutes(c: Context, m: Int) =
         p(c).edit().putInt("lastUnlockMin", m).apply()
@@ -36,8 +58,8 @@ object Store {
         return s
     }
 
-    /** The main password, or the separate filter password. */
-    enum class Pw(val prefix: String) { MAIN(""), FILTER("f_") }
+    /** Each password has its own salt, hash, attempt counter and lockout deadline. */
+    enum class Pw(val prefix: String) { MAIN(""), FILTER("f_"), SETTINGS("s_") }
 
     private val DEFAULT_PROTECTED = setOf("com.google.android.youtube", "com.android.chrome","com.vivo.browser")
     private val DEFAULT_BLOCKED = setOf(
@@ -81,11 +103,11 @@ object Store {
             prefs.edit().putInt(k + "fails", 0).apply()
             return true
         }
-        val fails = prefs.getInt(k + "fails", 0) + 1
+        val fails = (prefs.getInt(k + "fails", 0).toLong() + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         val e = prefs.edit().putInt(k + "fails", fails)
-        if (fails >= 5) {
-            val minutes = minOf(60L, 1L shl (fails - 5).coerceAtMost(6))
-            e.putLong(k + "lockoutUntil", System.currentTimeMillis() + minutes * 60_000L)
+        val lockout = timingConfig(c).passwordLockoutMs(fails)
+        if (lockout > 0) {
+            e.putLong(k + "lockoutUntil", System.currentTimeMillis() + lockout)
         }
         e.apply()
         return false
@@ -120,7 +142,7 @@ object Store {
     fun unlockedUntil(c: Context) = p(c).getLong("unlockedUntil", 0L)
 
     fun setUnlockedUntil(c: Context, t: Long) =
-        p(c).edit().putLong("unlockedUntil", t).apply()
+        p(c).edit().putLong("unlockedUntil", timingConfig(c).capUnlockUntil(t, System.currentTimeMillis())).apply()
 
     // ---------- Google app DNS blocklist ----------
 
@@ -135,16 +157,16 @@ object Store {
 
     // ---------- Chrome whitelist ----------
 
-    data class Site(val pattern: String, val addedAt: Long) {
-        val activeAt: Long get() = addedAt + Store.SITE_DELAY_MS
-    }
+    data class Site(val pattern: String, val addedAt: Long, val activeAt: Long)
 
-    fun sites(c: Context): List<Site> =
-        p(c).getStringSet("sites", emptySet())!!.mapNotNull { raw ->
+    fun sites(c: Context): List<Site> {
+        val config = timingConfig(c)
+        return p(c).getStringSet("sites", emptySet())!!.mapNotNull { raw ->
             val i = raw.indexOf('|')
             val t = if (i > 0) raw.substring(0, i).toLongOrNull() else null
-            if (t == null) null else Site(raw.substring(i + 1), t)
+            if (t == null) null else Site(raw.substring(i + 1), t, config.siteActiveAt(t))
         }.sortedBy { it.addedAt }
+    }
 
     fun addSite(c: Context, pattern: String): Boolean {
         val set = p(c).getStringSet("sites", emptySet())!!.toMutableSet()
@@ -160,7 +182,7 @@ object Store {
         p(c).edit().putStringSet("sites", set).apply()
     }
 
-    /** Only sites whose 15-minute wait is over. */
+    /** Only sites whose configured wait is over. */
     fun activePatterns(c: Context): List<String> {
         val now = System.currentTimeMillis()
         return sites(c).filter { now >= it.activeAt }.map { it.pattern }

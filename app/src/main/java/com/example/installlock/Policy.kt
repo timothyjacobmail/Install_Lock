@@ -21,8 +21,6 @@ import android.view.accessibility.AccessibilityManager
 
 
 object Policy {
-    const val LOCK_MS = 15 * 60 * 1000L
-
     fun dpm(c: Context): DevicePolicyManager =
         c.getSystemService(DevicePolicyManager::class.java)
 
@@ -48,8 +46,7 @@ object Policy {
         }
     }
 
-    /** Suspend anything installed < 15 min ago, unsuspend everything else. */
-    /** Suspend new installs (<15 min) and protected apps whose unlock window has ended. */
+    /** Suspend new installs and protected apps whose unlock window has ended. */
     const val CHROME = "com.android.chrome"
 
     /** Set to true if a site that has just become active still shows "blocked" in an
@@ -68,6 +65,7 @@ object Policy {
         val admin = admin(c)
         val pm = c.packageManager
         val now = System.currentTimeMillis()
+        val timings = Store.timingConfig(c)
         val homePkg = pm.resolveActivity(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
         )?.activityInfo?.packageName
@@ -76,12 +74,12 @@ object Policy {
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
         val neverRules = Store.neverInstall(c)
 
-        // Curbox guard: "down" only after 15 s of its service being off, so updates and reboots don't trip it.
+        // Allow the configured grace period after Curbox stops, including during updates and reboots.
         val guardOn = Store.curboxGuard(c)
         var curboxDown = false
         if (guardOn && !curboxRunning(c)) {
             if (curboxDownSince == 0L) curboxDownSince = now
-            curboxDown = now - curboxDownSince >= 15_000L
+            curboxDown = now - curboxDownSince >= timings.milliseconds(TimingOption.CURBOX_GRACE)
         } else {
             curboxDownSince = 0L
         }
@@ -110,7 +108,8 @@ object Policy {
             val isGuarded = guardOn && name in CURBOX_GUARDED
             if (isSystem && !isProtected && !isBrowser && !isGuarded) continue
 
-            val newInstall = !isSystem && ((now - pkg.firstInstallTime) in 0 until LOCK_MS)
+            val newInstall = !isSystem && ((now - pkg.firstInstallTime) in
+                    0 until timings.milliseconds(TimingOption.INSTALL_WAIT))
             val shouldLock = newInstall || (isProtected && gateClosed) || isBrowser ||
                     (isGuarded && curboxDown)
             try {
@@ -135,10 +134,11 @@ object Policy {
     private fun blockedRule(rules: Set<String>, pkgName: String, label: String): String? =
         rules.firstOrNull { pkgName.lowercase().contains(it) || label.contains(it) }
 
-    /** Silent uninstall (a device owner may do this). Asks at most once per 30 seconds per app. */
+    /** Silent uninstall, throttled per app by the configured retry interval. */
     private fun requestUninstall(c: Context, pkg: String) {
         val now = System.currentTimeMillis()
-        if (now - (uninstallAsked[pkg] ?: 0L) < 30_000L) return
+        if (now - (uninstallAsked[pkg] ?: 0L) <
+            Store.timingConfig(c).milliseconds(TimingOption.UNINSTALL_RETRY)) return
         uninstallAsked[pkg] = now
         try {
             val intent = Intent("com.example.installlock.UNINSTALL_RESULT").setPackage(c.packageName)
@@ -195,7 +195,7 @@ object Policy {
             dpm.setPackagesSuspended(admin, arrayOf(CHROME), true)
             Handler(Looper.getMainLooper()).postDelayed({
                 try { dpm.setPackagesSuspended(admin, arrayOf(CHROME), false) } catch (_: Exception) { }
-            }, 1500)
+            }, Store.timingConfig(c).milliseconds(TimingOption.CHROME_RESTART))
         } catch (_: Exception) { }
     }
 

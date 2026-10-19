@@ -12,6 +12,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
@@ -33,6 +34,7 @@ class MainActivity : Activity() {
     private var current: (() -> Unit)? = null
     private var receivedSiteShare = false
     private var sharedDomain: String? = null
+    private var settingsAuthed = false
 
     /** Go forward to a new screen. Back returns to the one we left. */
     private fun goTo(screen: () -> Unit) {
@@ -115,6 +117,7 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        settingsAuthed = false
         if (!isChangingConfigurations) {
             authed = false
             history.clear()
@@ -251,6 +254,7 @@ class MainActivity : Activity() {
                 }
             },
             button("Chrome whitelist") { goTo { showChromeSites() } },
+            button("Settings") { openSettings() },
             status,
             button("Lock protected apps now") {
                 Store.setUnlockedUntil(this, 0L)
@@ -263,34 +267,37 @@ class MainActivity : Activity() {
     private fun showDashboard() {
         val shotsBlocked = Policy.isScreenCaptureBlocked(this)
         val hasFilterPw = Store.hasPassword(this, Store.Pw.FILTER)
+        val timings = Store.timingConfig(this)
+        val maxUnlock = timings[TimingOption.MAX_UNLOCK]
 
         val minutes = EditText(this)
         minutes.inputType = InputType.TYPE_CLASS_NUMBER
         minutes.hint = "Minutes"
         minutes.setText(Store.lastUnlockMinutes(this).toString())
 
-        val presets = LinearLayout(this)
-        presets.orientation = LinearLayout.HORIZONTAL
-        for (m in listOf(15, 30, 60, 120)) {
-            presets.addView(
+        val presetRow = LinearLayout(this)
+        presetRow.orientation = LinearLayout.HORIZONTAL
+        for (m in timings.unlockPresets) {
+            presetRow.addView(
                 button("$m") { minutes.setText(m.toString()) },
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             )
         }
+        val presets = HorizontalScrollView(this).apply { addView(presetRow) }
 
         screen(
             label("Install Lock is active", 22f),
-            label("New apps are suspended for 15 minutes after install."),
+            label("New apps are suspended for ${timings[TimingOption.INSTALL_WAIT]} minutes after install."),
             label(unlockStatus()),
             label("Chrome lock: " + (if (Store.chromeLock(this)) "ON (whitelist only)" else "off")),
-            label("Unlock for how many minutes? (max ${Store.MAX_UNLOCK_MIN})"),
+            label("Unlock for how many minutes? (max $maxUnlock)"),
             label(curboxStatus()),
             minutes,
             presets,
             button("Unlock protected apps") {
                 val m = minutes.text.toString().toIntOrNull()
-                if (m == null || m < 1 || m > Store.MAX_UNLOCK_MIN) {
-                    toast("Enter 1 to ${Store.MAX_UNLOCK_MIN} minutes.")
+                if (m == null || m < 1 || m > maxUnlock) {
+                    toast("Enter 1 to $maxUnlock minutes.")
                 } else {
                     Store.setLastUnlockMinutes(this, m)
                     Store.setUnlockedUntil(this, System.currentTimeMillis() + m * 60_000L)
@@ -330,7 +337,8 @@ class MainActivity : Activity() {
                     reopen()
                 }
             },
-            button("Change password") { goTo { showChangePassword() } }
+            button("Change password") { goTo { showChangePassword() } },
+            button("Settings") { openSettings() }
         )
     }
 
@@ -523,28 +531,32 @@ class MainActivity : Activity() {
         if (!Store.hasPassword(this, Store.Pw.FILTER)) {
             goTo { showSetFilterPassword() }
         } else {
-            goTo { showFilterGate(title, action) }
+            goTo { showPasswordGate(title, Store.Pw.FILTER, action) }
         }
     }
 
-    private fun showFilterGate(title: String, action: () -> Unit) {
-        val f = Store.Pw.FILTER
-        val pw = passwordField("Filter password")
+    private fun showPasswordGate(title: String, which: Store.Pw, action: () -> Unit) {
+        val passwordName = when (which) {
+            Store.Pw.MAIN -> "main password"
+            Store.Pw.FILTER -> "filter password"
+            Store.Pw.SETTINGS -> "settings password"
+        }
+        val pw = passwordField(passwordName.replaceFirstChar { it.uppercase() })
         val msg = label("")
         screen(
             label(title, 22f),
-            label("Enter the filter password."),
+            label("Enter the $passwordName."),
             pw, msg,
             button("Confirm") {
-                val wait = Store.lockoutRemainingMs(this, f)
+                val wait = Store.lockoutRemainingMs(this, which)
                 if (wait > 0) {
                     msg.text = "Too many attempts. Try again in ${(wait + 59_999) / 60_000} min."
-                } else if (Store.checkPassword(this, pw.text.toString(), f)) {
+                } else if (Store.checkPassword(this, pw.text.toString(), which)) {
                     action()
                 } else {
-                    val w = Store.lockoutRemainingMs(this, f)
+                    val w = Store.lockoutRemainingMs(this, which)
                     msg.text = if (w > 0) "Too many attempts. Try again in ${(w + 59_999) / 60_000} min."
-                    else "Wrong filter password."
+                    else "Wrong $passwordName."
                 }
             },
             button("Cancel") { back() }
@@ -609,7 +621,7 @@ class MainActivity : Activity() {
         if (!Store.hasPassword(this, Store.Pw.FILTER)) {
             showSetFilterPassword(onSaved = openForm)
         } else {
-            showFilterGate("Add to Chrome whitelist", openForm)
+            showPasswordGate("Add to Chrome whitelist", Store.Pw.FILTER, openForm)
         }
     }
 
@@ -617,6 +629,7 @@ class MainActivity : Activity() {
         val sites = Store.sites(this)
         val now = System.currentTimeMillis()
         val lockOn = Store.chromeLock(this)
+        val siteWait = Store.timingConfig(this)[TimingOption.SITE_WAIT]
 
         val rows = sites.map {
             if (now >= it.activeAt) "✓  ${it.pattern}"
@@ -642,7 +655,7 @@ class MainActivity : Activity() {
             "Chrome only opens ✓ sites. " +
                     (if (b.isEmpty()) "No other browsers found." else "Other browsers suspended: ${b.joinToString()}")
         } else {
-            "Chrome lock is off, so Chrome is unrestricted. Sites you add still start their 15-minute wait."
+            "Chrome lock is off, so Chrome is unrestricted. Sites you add still start their $siteWait-minute wait."
         }
 
         val lockBtn = button(if (lockOn) "Turn Chrome lock OFF (filter password)" else "Turn Chrome lock ON") {
@@ -661,7 +674,7 @@ class MainActivity : Activity() {
                 reopen()
             }
         }
-        val add = button("Add site (filter password, 15 min wait)") {
+        val add = button("Add site (filter password, $siteWait min wait)") {
             withFilterPassword("Add a site") { swapTo { showAddSite() } }
         }
         val refresh = button("Refresh") { reopen() }
@@ -681,6 +694,7 @@ class MainActivity : Activity() {
     }
 
     private fun showAddSite(initialSite: String = "") {
+        val siteWait = Store.timingConfig(this)[TimingOption.SITE_WAIT]
         val site = EditText(this)
         site.hint = "example.com or example.com/path"
         site.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
@@ -690,7 +704,7 @@ class MainActivity : Activity() {
             "No valid website found in the shared text. Enter the domain below." else "")
         screen(
             label("Add a site", 22f),
-            label("It becomes usable in Chrome ${Store.SITE_DELAY_MS / 60_000} minutes after you add it. " +
+            label("It becomes usable in Chrome $siteWait minutes after you add it. " +
                     "A domain also allows its subdomains, and you can add a path to allow only part of a site."),
             site, msg,
             button("Add") {
@@ -699,12 +713,171 @@ class MainActivity : Activity() {
                     s == null -> msg.text = "That doesn't look like a specific site. Use something like example.com."
                     !Store.addSite(this, s) -> msg.text = "$s is already on the list."
                     else -> {
-                        msg.text = "Added $s. It will be active in ${Store.SITE_DELAY_MS / 60_000} min."
+                        Policy.syncChrome(this)
+                        msg.text = "Added $s. It will be active in $siteWait min."
                         site.setText("")
                     }
                 }
             },
             button("Done") { back() }
+        )
+    }
+
+    // ---------- password-protected timing settings ----------
+
+    private fun openSettings() {
+        settingsAuthed = false
+        goTo {
+            if (Store.hasPassword(this, Store.Pw.SETTINGS)) {
+                showSettingsGate()
+            } else if (authed) {
+                showSetSettingsPassword()
+            } else {
+                showPasswordGate("Set up settings password", Store.Pw.MAIN) {
+                    swapTo { showSetSettingsPassword() }
+                }
+            }
+        }
+    }
+
+    private fun showSettingsGate() {
+        showPasswordGate("Settings", Store.Pw.SETTINGS) {
+            settingsAuthed = true
+            swapTo { showSettings() }
+        }
+    }
+
+    private fun showSetSettingsPassword() {
+        val p1 = passwordField("New settings password")
+        val p2 = passwordField("Confirm settings password")
+        val msg = label("")
+        screen(
+            label("Set settings password", 22f),
+            label("This separate password protects durations and time limits. " +
+                    "Use at least 8 characters, including a letter and a number."),
+            p1, p2, msg,
+            button("Save password") {
+                val value = p1.text.toString()
+                when {
+                    Store.hasPassword(this, Store.Pw.SETTINGS) -> {
+                        settingsAuthed = false
+                        swapTo { showSettingsGate() }
+                    }
+                    !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
+                    value != p2.text.toString() -> msg.text = "Passwords don't match."
+                    else -> {
+                        Store.setPassword(this, value, Store.Pw.SETTINGS)
+                        settingsAuthed = true
+                        swapTo { showSettings() }
+                    }
+                }
+            },
+            button("Cancel") { back() }
+        )
+    }
+
+    private fun showSettings() {
+        if (!settingsAuthed) {
+            swapTo { showSettingsGate() }
+            return
+        }
+        val config = Store.timingConfig(this)
+        val fields = TimingOption.entries.associateWith { option ->
+            EditText(this).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                hint = option.title
+                setText(config[option].toString())
+            }
+        }
+        val presets = EditText(this).apply {
+            hint = "For example: 15, 30, 60, 120"
+            inputType = InputType.TYPE_CLASS_TEXT
+            setText(config.unlockPresets.joinToString(", "))
+        }
+        val msg = label("")
+        val views = mutableListOf<View>(
+            label("Settings", 22f),
+            label("Changes take effect when saved. Install and whitelist waits are recalculated " +
+                    "from the original install/add times, including existing entries. " +
+                    "An active unlock is capped to the new maximum; existing password lockouts keep their end times.")
+        )
+        for ((option, field) in fields) {
+            when (option) {
+                TimingOption.INSTALL_WAIT -> views.add(label("Apps and websites", 20f))
+                TimingOption.CURBOX_GRACE -> views.add(label("Other timing", 20f))
+                TimingOption.PASSWORD_FAILURES -> views.add(label("Password attempts and lockouts", 20f))
+                else -> Unit
+            }
+            views.add(label("${option.title} (${option.unit}, ${option.minimum}-${option.maximum})"))
+            views.add(field)
+        }
+        views.add(label("Unlock button presets (1-6 different durations in minutes, separated by commas)"))
+        views.add(presets)
+        views.add(msg)
+        views.add(button("Save settings") {
+            if (settingsAuthed) {
+                val values = fields.mapValues { it.value.text.toString().trim().toIntOrNull() }
+                val invalid = values.entries.firstOrNull { (option, value) ->
+                    value == null || value !in option.minimum..option.maximum
+                }
+                val presetValues = presets.text.toString().split(',').map { it.trim().toIntOrNull() }
+                if (invalid != null) {
+                    val option = invalid.key
+                    fields.getValue(option).error = "Enter ${option.minimum} to ${option.maximum} ${option.unit}."
+                    fields.getValue(option).requestFocus()
+                    msg.text = "Check ${option.title.lowercase()}."
+                } else if (presetValues.any { it == null }) {
+                    presets.error = "Enter whole minutes separated by commas."
+                    msg.text = "Check the unlock presets."
+                } else {
+                    val updated = TimingConfig(values.mapValues { it.value!! }, presetValues.filterNotNull())
+                    val error = updated.validationError()
+                    if (error != null) {
+                        msg.text = error
+                    } else {
+                        Store.saveTimingConfig(this, updated)
+                        Policy.sweep(this)
+                        LockService.start(this)
+                        msg.text = "Settings saved."
+                    }
+                }
+            }
+        })
+        views.add(button("Use default values") {
+            if (settingsAuthed) {
+                val defaults = TimingConfig()
+                fields.forEach { (option, field) -> field.setText(defaults[option].toString()); field.error = null }
+                presets.setText(defaults.unlockPresets.joinToString(", "))
+                msg.text = "Defaults filled in. Tap Save settings to apply them."
+            }
+        })
+        views.add(button("Change settings password") { goTo { showChangeSettingsPassword() } })
+        views.add(button("Back") { settingsAuthed = false; back() })
+        screen(*views.toTypedArray())
+    }
+
+    private fun showChangeSettingsPassword() {
+        if (!settingsAuthed) { back(); return }
+        val old = passwordField("Current settings password")
+        val p1 = passwordField("New settings password")
+        val p2 = passwordField("Confirm settings password")
+        val msg = label("")
+        screen(
+            label("Change settings password", 22f), old, p1, p2, msg,
+            button("Save password") {
+                if (settingsAuthed) {
+                    val which = Store.Pw.SETTINGS
+                    val value = p1.text.toString()
+                    when {
+                        Store.lockoutRemainingMs(this, which) > 0 -> msg.text = "Too many attempts. Try again later."
+                        !Store.checkPassword(this, old.text.toString(), which) -> msg.text = "Current settings password is wrong."
+                        !Store.isValidNewPassword(value) -> msg.text = "Needs 8+ characters with a letter and a number."
+                        value != p2.text.toString() -> msg.text = "Passwords don't match."
+                        else -> { Store.setPassword(this, value, which); back() }
+                    }
+                }
+            },
+            button("Cancel") { back() }
         )
     }
 

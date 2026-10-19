@@ -125,7 +125,7 @@ class DnsFilterService : VpnService() {
         val server = upstream() ?: return null
         DatagramSocket().use { s ->
             protect(s)
-            s.soTimeout = 4000
+            s.soTimeout = Store.timingConfig(this).milliseconds(TimingOption.DNS_TIMEOUT).toInt()
             s.connect(InetSocketAddress(server, 53))
             s.send(DatagramPacket(query, query.size))
             val buf = ByteArray(4096)
