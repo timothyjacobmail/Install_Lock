@@ -58,8 +58,15 @@ object Policy {
     /** Package names of browsers you want to keep while the Chrome lock is on. */
     private val ALLOWED_BROWSERS = emptySet<String>()
 
+    /** Refresh enforcement first so the UI reports the same rules and actual Android state. */
+    fun lockStatuses(c: Context): List<AppLockStatus> = reconcile(c, collectStatus = true)
+
     fun sweep(c: Context) {
-        if (!isOwner(c)) return
+        reconcile(c, collectStatus = false)
+    }
+
+    private fun reconcile(c: Context, collectStatus: Boolean): List<AppLockStatus> {
+        if (!isOwner(c)) return emptyList()
         enforceNoUninstall(c)
         val dpm = dpm(c)
         val admin = admin(c)
@@ -72,7 +79,24 @@ object Policy {
         val protectedApps = Store.protectedApps(c)
         val gateClosed = now >= Store.unlockedUntil(c)
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
+        val previousKeywordGuard = Store.keywordGuardPackages(c)
+        val accessibilityEnabled = BrowserKeywordService.isEnabled(c)
+        val keywordBrowsers = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
+            BrowserPackages.discover(c) + previousKeywordGuard else emptySet()
+        val keywordReleaseRetries = mutableSetOf<String>()
         val neverRules = Store.neverInstall(c)
+        val statuses = mutableListOf<AppLockStatus>()
+
+        fun record(pkg: PackageInfo, info: ApplicationInfo, reasons: AppLockReasons) {
+            if (!collectStatus) return
+            val suspended = try { dpm.isPackageSuspended(admin, pkg.packageName) }
+                catch (_: Exception) { null }
+            // Keep managed apps visible when unlocked, and include any unexpected suspension.
+            if (reasons.shouldLock || suspended != false || pkg.packageName in protectedApps ||
+                pkg.packageName == CHROME) {
+                statuses.add(AppLockStatus(pkg.packageName, info.loadLabel(pm).toString(), reasons, suspended))
+            }
+        }
 
         // Allow the configured grace period after Curbox stops, including during updates and reboots.
         val guardOn = Store.curboxGuard(c)
@@ -91,34 +115,50 @@ object Policy {
             val isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
 
             // Apps that must never stay installed: suspend at once, then uninstall.
-            if (!isSystem && neverRules.isNotEmpty() &&
-                blockedRule(neverRules, name, labelOf(pm, pkg, info)) != null
-            ) {
-                try {
-                    if (!dpm.isPackageSuspended(admin, name)) {
-                        dpm.setPackagesSuspended(admin, arrayOf(name), true)
-                    }
-                } catch (_: Exception) { }
-                requestUninstall(c, name)
-                continue
-            }
+            val neverRule = if (!isSystem)
+                blockedRule(neverRules, name, labelOf(pm, pkg, info)) else null
 
             val isProtected = name in protectedApps
             val isBrowser = name in browsers
             val isGuarded = guardOn && name in CURBOX_GUARDED
-            if (isSystem && !isProtected && !isBrowser && !isGuarded) continue
+            val keywordPaused = name in keywordBrowsers
+            // Previously guarded system browsers must also be processed so they can be resumed.
+            if (isSystem && !isProtected && !isBrowser && !isGuarded &&
+                !keywordPaused && name !in previousKeywordGuard) {
+                // Read status without changing policy for unrelated system apps.
+                if (name == CHROME) record(pkg, info, AppLockReasons())
+                continue
+            }
 
             val newInstall = !isSystem && ((now - pkg.firstInstallTime) in
                     0 until timings.milliseconds(TimingOption.INSTALL_WAIT))
-            val shouldLock = newInstall || (isProtected && gateClosed) || isBrowser ||
-                    (isGuarded && curboxDown)
+            val reasons = AppLockReasons(
+                keywordServiceMissing = keywordPaused,
+                accessibilityEnabled = accessibilityEnabled,
+                appLock = isProtected && gateClosed,
+                installWaitUntil = if (newInstall)
+                    pkg.firstInstallTime + timings.milliseconds(TimingOption.INSTALL_WAIT) else null,
+                otherBrowser = isBrowser,
+                curboxMissing = isGuarded && curboxDown,
+                neverInstallRule = neverRule
+            )
+            val shouldLock = reasons.shouldLock
             try {
                 if (dpm.isPackageSuspended(admin, name) != shouldLock) {
-                    dpm.setPackagesSuspended(admin, arrayOf(name), shouldLock)
+                    val failed = dpm.setPackagesSuspended(admin, arrayOf(name), shouldLock)
+                    if (name in failed && name in previousKeywordGuard) keywordReleaseRetries.add(name)
                 }
-            } catch (_: Exception) { /* package vanished mid-sweep */ }
+            } catch (_: Exception) {
+                if (name in previousKeywordGuard) keywordReleaseRetries.add(name)
+            }
+            record(pkg, info, reasons)
+            if (neverRule != null) requestUninstall(c, name)
         }
+        Store.setKeywordGuardPackages(c, keywordBrowsers + keywordReleaseRetries)
         syncChrome(c)
+        return statuses.sortedWith(
+            compareByDescending<AppLockStatus> { it.packageName == CHROME }
+                .thenByDescending { it.needsAttention }.thenBy { it.appName.lowercase() })
     }
 
     private val labelCache = HashMap<String, String>()
@@ -230,7 +270,10 @@ object Policy {
     fun release(c: Context, packages: Collection<String>) {
         if (!isOwner(c) || packages.isEmpty()) return
         try {
-            dpm(c).setPackagesSuspended(admin(c), packages.toTypedArray(), false)
+            val keywordGuard = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
+                BrowserPackages.discover(c) + Store.keywordGuardPackages(c) else emptySet()
+            val releasable = packages.filter { it !in keywordGuard }
+            if (releasable.isNotEmpty()) dpm(c).setPackagesSuspended(admin(c), releasable.toTypedArray(), false)
         } catch (_: Exception) { }
     }
     fun isScreenCaptureBlocked(c: Context): Boolean =

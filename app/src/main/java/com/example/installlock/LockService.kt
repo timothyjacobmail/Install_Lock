@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
+import android.provider.Settings
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -17,9 +19,14 @@ import android.os.Looper
 class LockService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
+    private val accessibilityObserver = object : ContentObserver(handler) {
+        override fun onChange(selfChange: Boolean) { Policy.sweep(this@LockService) }
+    }
+    private var observingAccessibility = false
 
     private val tick = object : Runnable {
         override fun run() {
+            Store.applyDueKeywordRemovals(this@LockService)
             Policy.sweep(this@LockService)
             handler.postDelayed(this, Store.timingConfig(this@LockService).milliseconds(TimingOption.POLICY_INTERVAL))
         }
@@ -51,6 +58,15 @@ class LockService : Service() {
             pkgReceiver,
             IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
         )
+        try {
+            contentResolver.registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), false, accessibilityObserver)
+            observingAccessibility = true
+            contentResolver.registerContentObserver(
+                Settings.Secure.getUriFor(Settings.Secure.ACCESSIBILITY_ENABLED), false, accessibilityObserver)
+        } catch (_: SecurityException) {
+            // Service disconnect callbacks and the repeating sweep still enforce the guard.
+        }
         handler.post(tick)
     }
 
@@ -66,6 +82,7 @@ class LockService : Service() {
     override fun onDestroy() {
         handler.removeCallbacks(tick)
         unregisterReceiver(pkgReceiver)
+        if (observingAccessibility) contentResolver.unregisterContentObserver(accessibilityObserver)
         super.onDestroy()
     }
 

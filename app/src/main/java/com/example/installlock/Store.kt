@@ -226,6 +226,89 @@ object Store {
     fun setChromeLock(c: Context, on: Boolean) =
         p(c).edit().putBoolean("chromeLock", on).apply()
 
+    // ---------- browser keyword filter ----------
+
+    data class BrowserKeyword(val word: String, val removeAt: Long?)
+
+    fun browserKeywordFilterEnabled(c: Context): Boolean = p(c).getBoolean("keywordFilterEnabled", true)
+
+    fun enableBrowserKeywordFilter(c: Context) = p(c).edit().putBoolean("keywordFilterEnabled", true).apply()
+
+    /** There is no unauthenticated setter for disabling this protection. */
+    fun disableBrowserKeywordFilter(c: Context, password: String): Boolean {
+        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        p(c).edit().putBoolean("keywordFilterEnabled", false).apply()
+        return true
+    }
+
+    fun keywordGuardPackages(c: Context): Set<String> =
+        p(c).getStringSet("keywordGuardPackages", emptySet())!!.toSet()
+
+    fun setKeywordGuardPackages(c: Context, packages: Set<String>) {
+        if (packages != keywordGuardPackages(c)) p(c).edit().putStringSet("keywordGuardPackages", packages).apply()
+    }
+
+    private val DEFAULT_BROWSER_KEYWORDS = setOf("anime", "manga", "webtoon")
+
+    private fun keywordRemovals(c: Context): Map<String, Long> =
+        p(c).getStringSet("keywordRemovalRequests", emptySet())!!.mapNotNull { raw ->
+            val split = raw.indexOf('|')
+            val deadline = if (split > 0) raw.substring(0, split).toLongOrNull() else null
+            if (deadline == null) null else raw.substring(split + 1) to deadline
+        }.toMap()
+
+    @Synchronized
+    fun applyDueKeywordRemovals(c: Context, now: Long = System.currentTimeMillis()) {
+        val removals = keywordRemovals(c)
+        val due = removals.filterValues { now >= it }.keys
+        if (due.isEmpty()) return
+        val words = p(c).getStringSet("browserKeywords", DEFAULT_BROWSER_KEYWORDS)!!.toSet()
+        p(c).edit().putStringSet("browserKeywords", words - due)
+            .putStringSet("keywordRemovalRequests", removals.filterKeys { it !in due }
+                .map { (word, deadline) -> "$deadline|$word" }.toSet()).apply()
+    }
+
+    @Synchronized
+    fun browserKeywordEntries(c: Context): List<BrowserKeyword> {
+        applyDueKeywordRemovals(c)
+        val removals = keywordRemovals(c)
+        return p(c).getStringSet("browserKeywords", DEFAULT_BROWSER_KEYWORDS)!!
+            .sorted().map { BrowserKeyword(it, removals[it]) }
+    }
+
+    fun browserKeywords(c: Context): Set<String> = browserKeywordEntries(c).map { it.word }.toSet()
+
+    @Synchronized
+    fun addBrowserKeyword(c: Context, input: String): Boolean {
+        val word = KeywordMatcher.normalizeWord(input) ?: return false
+        applyDueKeywordRemovals(c)
+        val words = p(c).getStringSet("browserKeywords", DEFAULT_BROWSER_KEYWORDS)!!.toSet()
+        val removals = keywordRemovals(c)
+        if (word in words && word !in removals) return false
+        p(c).edit().putStringSet("browserKeywords", words + word)
+            .putStringSet("keywordRemovalRequests", removals.filterKeys { it != word }
+                .map { (w, deadline) -> "$deadline|$w" }.toSet()).apply()
+        return true
+    }
+
+    @Synchronized
+    fun requestKeywordRemoval(c: Context, word: String): Long? {
+        if (word !in browserKeywords(c)) return null
+        val removals = keywordRemovals(c)
+        removals[word]?.let { return it }
+        val deadline = System.currentTimeMillis() + timingConfig(c).milliseconds(TimingOption.KEYWORD_REMOVAL_WAIT)
+        p(c).edit().putStringSet("keywordRemovalRequests", (removals + (word to deadline))
+            .map { (w, time) -> "$time|$w" }.toSet()).apply()
+        return deadline
+    }
+
+    @Synchronized
+    fun cancelKeywordRemoval(c: Context, word: String) {
+        applyDueKeywordRemovals(c)
+        p(c).edit().putStringSet("keywordRemovalRequests", keywordRemovals(c).filterKeys { it != word }
+            .map { (w, deadline) -> "$deadline|$w" }.toSet()).apply()
+    }
+
     // ---------- unused now, kept so older code still compiles ----------
 
     fun filterHost(c: Context): String = p(c).getString("filterHost", "") ?: ""

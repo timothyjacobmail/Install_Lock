@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -49,11 +50,45 @@ class MainActivity : Activity() {
         val until = Store.unlockedUntil(this)
         val left = until - System.currentTimeMillis()
         return if (left > 0)
-            "Protected apps are unlocked until " +
+            "App-lock timer: temporarily unlocked until " +
                     DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(until)) +
-                    " (${(left + 59_999) / 60_000} min left)."
+                    " (${(left + 59_999) / 60_000} min left). Other protections can still lock an app."
         else
-            "Protected apps are locked."
+            "App-lock timer: no temporary unlock is active."
+    }
+
+    private fun chromeLockExplanation(statuses: List<AppLockStatus>): String =
+        statuses.firstOrNull { it.packageName == Policy.CHROME }?.explanation()
+            ?: "Chrome is not installed."
+
+    /** Read-only and available before login, so a blocked browser always has a recovery explanation. */
+    private fun showLockReasons() {
+        val statuses = Policy.lockStatuses(this)
+        val views = mutableListOf<View>(
+            label("Why apps are locked", 22f),
+            label("All current reasons are listed below. Each active reason must be cleared before an app can open. " +
+                    "Tap Refresh after changing a setting or waiting for a timer."),
+            label("Checked at " + DateFormat.getTimeInstance().format(Date())),
+            button("Refresh") { reopen() },
+            button("Android accessibility settings") {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            },
+            button("App locks") { goTo { showAppPicker() } },
+            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
+            button("Chrome whitelist") { goTo { showChromeSites() } }
+        )
+        if (Store.chromeLock(this)) views.add(label(
+            "Chrome website restriction: only active whitelist entries can open. " +
+                    "A site that is missing or still waiting will be blocked even when Chrome itself is unlocked. " +
+                    "Open Chrome whitelist to see each site's activation time."
+        ))
+        if (statuses.none { it.needsAttention }) views.add(label("No app is currently locked by Install Lock."))
+        for (status in statuses) {
+            views.add(label(status.explanation()))
+            views.add(label(status.packageName, 12f))
+        }
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
     }
     /** Swap the current screen for another, leaving no history entry for it. */
     private fun swapTo(screen: () -> Unit) {
@@ -133,7 +168,8 @@ class MainActivity : Activity() {
         return when {
             Store.curboxGuard(this) && running -> "Curbox guard: ON. Curbox is running."
             Store.curboxGuard(this) ->
-                "Curbox guard: ON. Curbox is NOT running, so YouTube and Instagram are paused."
+                "Curbox guard: ON. Curbox is not running. YouTube and Instagram lock after the grace period. " +
+                        "See Why apps are locked for their current status."
             !installed -> "Curbox guard: off. Curbox isn't installed."
             else -> "Curbox guard: off. Curbox is " + (if (running) "running." else "installed but not running.")
         }
@@ -238,9 +274,12 @@ class MainActivity : Activity() {
         val pw = passwordField("Password")
         val msg = label("")
         val status = label(unlockStatus())
+        val locks = Policy.lockStatuses(this)
         fun waitText(ms: Long) = "Too many attempts. Try again in ${(ms + 59_999) / 60_000} min."
         screen(
             label("Install Lock", 22f),
+            label(chromeLockExplanation(locks)),
+            button("Why apps are locked") { goTo { showLockReasons() } },
             label("Enter your password."),
             pw, msg,
             button("Unlock") {
@@ -257,6 +296,7 @@ class MainActivity : Activity() {
             },
             button("Chrome whitelist") { goTo { showChromeSites() } },
             button("App locks") { goTo { showAppPicker() } },
+            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
             button("Settings") { openSettings() },
             status,
             button("Lock protected apps now") {
@@ -268,6 +308,7 @@ class MainActivity : Activity() {
     }
 
     private fun showDashboard() {
+        val locks = Policy.lockStatuses(this)
         val shotsBlocked = Policy.isScreenCaptureBlocked(this)
         val hasFilterPw = Store.hasPassword(this, Store.Pw.FILTER)
         val timings = Store.timingConfig(this)
@@ -290,6 +331,8 @@ class MainActivity : Activity() {
 
         screen(
             label("Install Lock is active", 22f),
+            label(chromeLockExplanation(locks)),
+            button("Why apps are locked") { goTo { showLockReasons() } },
             label("New apps are suspended for ${timings[TimingOption.INSTALL_WAIT]} minutes after install."),
             label(unlockStatus()),
             label("Chrome lock: " + (if (Store.chromeLock(this)) "ON (whitelist only)" else "off")),
@@ -314,6 +357,7 @@ class MainActivity : Activity() {
                 reopen()
             },
             button("App locks") { goTo { showAppPicker() } },
+            button("Browser keyword filter") { goTo { showBrowserKeywords() } },
             button("Never-install list") { goTo { showNeverInstall() } },
             button("Google app filter") { goTo { showGoogleFilter() } },
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
@@ -321,7 +365,7 @@ class MainActivity : Activity() {
                 reopen()
             },
             button(if (hasFilterPw) "Change filter password" else "Set filter password") {
-                if (hasFilterPw) goTo { showChangeFilterPassword() } else goTo { showSetFilterPassword() }
+                if (hasFilterPw) goTo { showChangeFilterPassword() } else goTo { showFilterPasswordSetup() }
             },
             button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } },
             button(if (Store.curboxGuard(this)) "Turn Curbox guard OFF (filter password)" else "Turn Curbox guard ON") {
@@ -485,6 +529,7 @@ class MainActivity : Activity() {
                 "This ends any temporary unlock session. Switching off requires the separate app-lock password. " +
                 "Other install delays and filters can still block an app."))
         col.addView(label(unlockStatus()))
+        col.addView(button("Why apps are locked") { goTo { showLockReasons() } })
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         col.addView(button(if (Store.hasPassword(this, Store.Pw.APP_LOCK))
             "Change app-lock password" else "Set app-lock password") { configureAppLockPassword() })
@@ -621,7 +666,7 @@ class MainActivity : Activity() {
     /** Asks for the filter password, then runs [action]. Weakening actions go through here. */
     private fun withFilterPassword(title: String, action: () -> Unit) {
         if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-            goTo { showSetFilterPassword() }
+            goTo { showFilterPasswordSetup() }
         } else {
             goTo { showPasswordGate(title, Store.Pw.FILTER, action) }
         }
@@ -660,6 +705,16 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun showFilterPasswordSetup(onSaved: (() -> Unit)? = null) {
+        if (authed) {
+            showSetFilterPassword(onSaved)
+        } else {
+            showPasswordGate("Set up filter password", Store.Pw.MAIN) {
+                swapTo { showSetFilterPassword(onSaved) }
+            }
+        }
+    }
+
     private fun showSetFilterPassword(onSaved: (() -> Unit)? = null) {
         val p1 = passwordField("New filter password")
         val p2 = passwordField("Confirm filter password")
@@ -673,6 +728,7 @@ class MainActivity : Activity() {
             button("Save") {
                 val a = p1.text.toString()
                 when {
+                    Store.hasPassword(this, Store.Pw.FILTER) -> msg.text = "A filter password is already set. Go back and use it."
                     !Store.isValidNewPassword(a) -> msg.text = "Needs 8+ characters with a letter and a number."
                     a != p2.text.toString() -> msg.text = "Passwords don't match."
                     else -> {
@@ -716,7 +772,7 @@ class MainActivity : Activity() {
     private fun showSharedSite() {
         val openForm = { swapTo { showAddSite(sharedDomain.orEmpty()) } }
         if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-            showSetFilterPassword(onSaved = openForm)
+            showFilterPasswordSetup(onSaved = openForm)
         } else {
             showPasswordGate("Add to Chrome whitelist", Store.Pw.FILTER, openForm)
         }
@@ -762,7 +818,7 @@ class MainActivity : Activity() {
                     back()
                 }
             } else if (!Store.hasPassword(this, Store.Pw.FILTER)) {
-                goTo { showSetFilterPassword() }
+                goTo { showFilterPasswordSetup() }
             } else {
                 if (Store.activePatterns(this).isEmpty()) {
                     toast("No active sites yet: Chrome will block everything until one is active.")
@@ -818,6 +874,114 @@ class MainActivity : Activity() {
             },
             button("Done") { back() }
         )
+    }
+
+    // ---------- browser keyword filter ----------
+
+    private fun showBrowserKeywords() {
+        val entries = Store.browserKeywordEntries(this)
+        val wait = Store.timingConfig(this)[TimingOption.KEYWORD_REMOVAL_WAIT]
+        val enabled = BrowserKeywordService.isEnabled(this)
+        val filterOn = Store.browserKeywordFilterEnabled(this)
+        val ready = BrowserKeywordService.isReady(this)
+        fun timeLabel(time: Long) = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(time))
+        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (entry in entries) {
+            val rowLabel = entry.word + if (entry.removeAt != null)
+                " — removal at ${timeLabel(entry.removeAt)}" else " — blocked"
+            list.addView(button(rowLabel) {
+                if (entry.removeAt != null) {
+                    AlertDialog.Builder(this)
+                        .setTitle(entry.word)
+                        .setMessage("This word remains blocked until ${timeLabel(entry.removeAt)}. Cancel its removal to keep it blocked?")
+                        .setPositiveButton("Keep blocked") { _, _ ->
+                            // Re-adding also restores a word if its removal expired while this dialog was open.
+                            Store.addBrowserKeyword(this, entry.word)
+                            reopen()
+                        }
+                        .setNegativeButton("Back", null).show()
+                } else {
+                    AlertDialog.Builder(this)
+                        .setTitle("Remove ${entry.word}?")
+                        .setMessage("It will remain blocked for $wait minutes, then be removed automatically. " +
+                                "You can cancel the removal while you wait.")
+                        .setPositiveButton("Start removal wait") { _, _ ->
+                            Store.requestKeywordRemoval(this, entry.word)
+                            reopen()
+                        }
+                        .setNegativeButton("Cancel", null).show()
+                }
+            })
+        }
+        if (entries.isEmpty()) list.addView(label("No blocked words."))
+        val field = EditText(this).apply {
+            hint = "Word or phrase to block"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        val msg = label("")
+        val add = button("Block word immediately") {
+            val word = KeywordMatcher.normalizeWord(field.text.toString())
+            if (word == null) {
+                msg.text = "Use 1-80 characters: letters, numbers, spaces, apostrophes or hyphens."
+            } else if (!Store.addBrowserKeyword(this, word)) {
+                msg.text = "$word is already blocked."
+            } else {
+                toast("Blocked $word immediately. Any pending removal was cancelled.")
+                reopen()
+            }
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        col.addView(label("Browser keyword filter", 22f))
+        col.addView(label(when {
+            !filterOn -> "Keyword filter: OFF (disabled with filter password)."
+            !ready -> "Keyword filter: ON. Browsers are blocked until the accessibility service is running."
+            else -> "Keyword filter: ON. Accessibility service is running."
+        }))
+        col.addView(label("Accessibility service: " + if (enabled) "enabled" else "OFF — enable it below"))
+        col.addView(button(if (filterOn) "Turn keyword filter OFF (filter password)" else "Turn keyword filter ON") {
+            if (Store.browserKeywordFilterEnabled(this)) {
+                if (!Store.hasPassword(this, Store.Pw.FILTER)) {
+                    toast("Set the filter password first, then retry turning the filter off.")
+                    goTo { showFilterPasswordSetup() }
+                } else {
+                    goTo { showCredentialGate("Turn keyword filter off", Store.Pw.FILTER,
+                        { password -> Store.disableBrowserKeywordFilter(this, password) }) {
+                        Policy.sweep(this)
+                        back()
+                    } }
+                }
+            } else {
+                Store.enableBrowserKeywordFilter(this)
+                Policy.sweep(this)
+                reopen()
+            }
+        })
+        col.addView(label("Checks visible webpage text, including search results, for whole words or phrases " +
+                "regardless of case. Typed fields are ignored. Tries the browser's current-tab close action; " +
+                "otherwise returns Home. Browser support depends on readable accessibility content. " +
+                "Page text stays on this device and is not saved."))
+        col.addView(button("Open Android accessibility settings") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
+        col.addView(label("Enable “Install Lock browser keyword filter”. If Android turns the service off, " +
+                "browser access is blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
+                "above to turn keyword protection off. Other app locks and Chrome whitelist rules still apply. " +
+                "Tap a word to request removal ($wait-minute wait); tap a pending removal to cancel it."))
+        col.addView(field)
+        col.addView(msg)
+        col.addView(add)
+        col.addView(label("Blocked words", 20f))
+        col.addView(list)
+        col.addView(button("Refresh") { reopen() })
+        col.addView(button("Back") { back() })
+        show(ScrollView(this).apply { isFillViewport = true; addView(col) })
+        val nextRemoval = entries.mapNotNull { it.removeAt }.minOrNull()
+        if (nextRemoval != null) list.postDelayed({
+            if (list.isAttachedToWindow && hasWindowFocus() && field.text.isBlank() && !field.hasFocus()) reopen()
+        }, (nextRemoval - System.currentTimeMillis()).coerceIn(100L, 60_000L))
     }
 
     // ---------- password-protected timing settings ----------
@@ -896,7 +1060,8 @@ class MainActivity : Activity() {
             label("Settings", 22f),
             label("Changes take effect when saved. Install and whitelist waits are recalculated " +
                     "from the original install/add times, including existing entries. " +
-                    "An active unlock is capped to the new maximum; existing password lockouts keep their end times.")
+                    "An active unlock is capped to the new maximum; existing password lockouts keep their end times. " +
+                    "Keyword removal requests keep their scheduled deadlines; their delay setting applies to new requests.")
         )
         for ((option, field) in fields) {
             when (option) {
