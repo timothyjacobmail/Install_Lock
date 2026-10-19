@@ -84,6 +84,7 @@ object Policy {
         val keywordBrowsers = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
             BrowserPackages.keywordTargets(c) + previousKeywordGuard else emptySet()
         val keywordReleaseRetries = mutableSetOf<String>()
+        val googleVpnMissing = !DnsFilterService.isReady(c)
         val neverRules = Store.neverInstall(c)
         val statuses = mutableListOf<AppLockStatus>()
 
@@ -93,7 +94,7 @@ object Policy {
                 catch (_: Exception) { null }
             // Keep managed apps visible when unlocked, and include any unexpected suspension.
             if (reasons.shouldLock || suspended != false || pkg.packageName in protectedApps ||
-                pkg.packageName == CHROME) {
+                pkg.packageName == CHROME || pkg.packageName == BrowserPackages.GOOGLE_APP) {
                 statuses.add(AppLockStatus(pkg.packageName, info.loadLabel(pm).toString(), reasons, suspended))
             }
         }
@@ -122,9 +123,10 @@ object Policy {
             val isBrowser = name in browsers
             val isGuarded = guardOn && name in CURBOX_GUARDED
             val keywordPaused = name in keywordBrowsers
+            val isGoogle = name == BrowserPackages.GOOGLE_APP
             // Previously guarded system apps must also be processed so they can be resumed.
             if (isSystem && !isProtected && !isBrowser && !isGuarded &&
-                !keywordPaused && name !in previousKeywordGuard) {
+                !keywordPaused && !isGoogle && name !in previousKeywordGuard) {
                 // Read status without changing policy for unrelated system apps.
                 if (name == CHROME) record(pkg, info, AppLockReasons())
                 continue
@@ -140,7 +142,8 @@ object Policy {
                     pkg.firstInstallTime + timings.milliseconds(TimingOption.INSTALL_WAIT) else null,
                 otherBrowser = isBrowser,
                 curboxMissing = isGuarded && curboxDown,
-                neverInstallRule = neverRule
+                neverInstallRule = neverRule,
+                googleVpnMissing = isGoogle && googleVpnMissing
             )
             val shouldLock = reasons.shouldLock
             try {
@@ -249,9 +252,12 @@ object Policy {
     fun enableGoogleFilter(c: Context): String {
         if (!isOwner(c)) return "Not device owner."
         return try {
-            dpm(c).setAlwaysOnVpnPackage(admin(c), c.packageName, false)  // false = fail open
-            c.startService(Intent(c, DnsFilterService::class.java))
-            "Filter is on. Check Settings → VPN: you should see Install Lock DNS filter."
+            // Device-wide VPN lockdown would also block unrelated apps. Google itself
+            // stays suspended until our DNS tunnel is ready instead.
+            dpm(c).setAlwaysOnVpnPackage(admin(c), c.packageName, false)
+            c.startForegroundService(Intent(c, DnsFilterService::class.java))
+            sweep(c)
+            "Starting Install Lock's VPN. Google remains locked until it is running; other protections still apply."
         } catch (e: Exception) {
             "Error: ${e.message}"
         }
@@ -262,7 +268,9 @@ object Policy {
         return try {
             dpm(c).setAlwaysOnVpnPackage(admin(c), null, false)
             c.stopService(Intent(c, DnsFilterService::class.java))
-            "Filter is off."
+            DnsFilterService.disconnect()
+            sweep(c)
+            "VPN is off. Google is locked until Install Lock's VPN is running again."
         } catch (e: Exception) {
             "Error: ${e.message}"
         }
@@ -273,7 +281,8 @@ object Policy {
         try {
             val keywordGuard = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
                 BrowserPackages.keywordTargets(c) + Store.keywordGuardPackages(c) else emptySet()
-            val releasable = packages.filter { it !in keywordGuard }
+            val vpnGuard = if (!DnsFilterService.isReady(c)) setOf(BrowserPackages.GOOGLE_APP) else emptySet()
+            val releasable = packages.filter { it !in keywordGuard && it !in vpnGuard }
             if (releasable.isNotEmpty()) dpm(c).setPackagesSuspended(admin(c), releasable.toTypedArray(), false)
         } catch (_: Exception) { }
     }

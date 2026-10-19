@@ -75,6 +75,7 @@ class MainActivity : Activity() {
             },
             button("App locks") { goTo { showAppPicker() } },
             button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
+            button("Google VPN filter") { goTo { showGoogleFilter() } },
             button("Chrome whitelist") { goTo { showChromeSites() } },
             button("Extra locked sites") { goTo { showExtraLockedSites() } }
         )
@@ -305,6 +306,7 @@ class MainActivity : Activity() {
             button("Extra locked sites") { goTo { showExtraLockedSites() } },
             button("App locks") { goTo { showAppPicker() } },
             button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
+            button("Google VPN filter") { goTo { showGoogleFilter() } },
             button("Settings") { openSettings() },
             status,
             button("Lock protected apps now") {
@@ -368,7 +370,7 @@ class MainActivity : Activity() {
             button("App locks") { goTo { showAppPicker() } },
             button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
             button("Never-install list") { goTo { showNeverInstall() } },
-            button("Google app filter") { goTo { showGoogleFilter() } },
+            button("Google VPN filter") { goTo { showGoogleFilter() } },
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
                 toast(Policy.setScreenCaptureBlocked(this, !shotsBlocked))
                 reopen()
@@ -614,10 +616,21 @@ class MainActivity : Activity() {
 
     private fun showGoogleFilter() {
         val msg = label("")
+        val status = label("")
+        fun updateStatus() {
+            if (!status.isAttachedToWindow) return
+            status.text = if (DnsFilterService.isReady(this))
+                "Install Lock VPN: running. Other app locks and keyword protection still apply."
+            else "Install Lock VPN: not running. Google remains locked until this VPN is running."
+            status.postDelayed({ updateStatus() }, 1000)
+        }
         screen(
-            label("Google app: block images & videos", 22f),
+            label("Google VPN filter", 22f),
             label("Routes only the Google app's DNS lookups through Install Lock and refuses " +
-                    "the servers that serve images and videos. Other apps aren't affected."),
+                    "the servers that serve images and videos. Other apps aren't affected. " +
+                    "Google requires this VPN to be running, even during temporary app unlocks and when keyword filtering is off. " +
+                    "Turning the VPN off keeps Google locked until you turn it on again."),
+            status,
             msg,
             button("Turn on") { msg.text = Policy.enableGoogleFilter(this) },
             button("Turn off (filter password)") {
@@ -629,6 +642,7 @@ class MainActivity : Activity() {
             button("DNS log / tune blocklist") { goTo { showDnsLog() } },
             button("Back") { back() }
         )
+        status.post { updateStatus() }
     }
 
     private fun showDnsLog() {
@@ -1044,12 +1058,14 @@ class MainActivity : Activity() {
         col.addView(button("Start a new Google search") {
             startActivity(GoogleSearchRecoveryActivity.openIntent(this))
         })
+        col.addView(button("Google VPN filter") { goTo { showGoogleFilter() } })
         col.addView(button("Open Android accessibility settings") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
         col.addView(label("Enable “${getString(R.string.browser_keyword_service_name)}”. If Android turns the service off, " +
                 "browsers and the Google app are blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
-                "above to turn keyword protection off. Other app locks and Chrome whitelist rules still apply. " +
+                "above to turn keyword protection off. Google also requires Install Lock's built-in VPN. " +
+                "Other app locks and Chrome whitelist rules still apply. " +
                 "Tap a word to request removal ($wait-minute wait); tap a pending removal to cancel it."))
         col.addView(field)
         col.addView(msg)

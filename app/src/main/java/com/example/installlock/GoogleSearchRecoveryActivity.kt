@@ -68,6 +68,10 @@ class GoogleSearchRecoveryActivity : Activity() {
                 message.text = "Enter a new search."
                 return
             }
+            if (!DnsFilterService.isReady(this)) {
+                message.text = "Google requires Install Lock's VPN. Turn on Google VPN filter in Install Lock, then retry your search."
+                return
+            }
             val words = if (Store.browserKeywordFilterEnabled(this)) Store.browserKeywords(this) else emptySet()
             val match = KeywordMatcher(words).findMatch(text)
             if (match != null) {
@@ -105,6 +109,10 @@ class GoogleSearchRecoveryActivity : Activity() {
             addView(Button(this@GoogleSearchRecoveryActivity).apply {
                 text = "Search Google"
                 setOnClickListener { search() }
+            })
+            addView(Button(this@GoogleSearchRecoveryActivity).apply {
+                text = "Turn on Google VPN"
+                setOnClickListener { message.text = Policy.enableGoogleFilter(this@GoogleSearchRecoveryActivity) }
             })
             addView(Button(this@GoogleSearchRecoveryActivity).apply {
                 text = "Home"

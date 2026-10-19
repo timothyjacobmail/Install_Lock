@@ -62,4 +62,28 @@ class AppLockStatusTest {
         assertTrue(text.contains("\"webtoon\""))
         assertTrue(text.contains("filter password"))
     }
+
+    @Test fun googleNeedsItsVpnEvenWithoutAnAppLockOrKeywordRestriction() {
+        val reasons = AppLockReasons(googleVpnMissing = true)
+        val google = AppLockStatus("com.google.android.googlequicksearchbox", "Google", reasons, true)
+        assertTrue(reasons.shouldLock)
+        assertTrue(google.needsAttention)
+        assertTrue(google.explanation().startsWith("Google is locked because:"))
+        assertTrue(google.explanation().contains("built-in VPN is not running"))
+        assertTrue(google.explanation().contains("Google VPN filter"))
+    }
+
+    @Test fun clearingOneGoogleRequirementDoesNotClearOtherLocks() {
+        val allMissing = AppLockReasons(googleVpnMissing = true, keywordServiceMissing = true, appLock = true)
+        assertEquals(3, allMissing.descriptions().size)
+        val unlockedApps = allMissing.copy(appLock = false)
+        assertTrue(unlockedApps.shouldLock)
+        val accessibilityRestored = unlockedApps.copy(keywordServiceMissing = false)
+        assertTrue(accessibilityRestored.shouldLock)
+        assertEquals(1, accessibilityRestored.descriptions().size)
+        val vpnRestoredFirst = unlockedApps.copy(googleVpnMissing = false)
+        assertTrue(vpnRestoredFirst.shouldLock)
+        assertEquals(1, vpnRestoredFirst.descriptions().size)
+        assertFalse(accessibilityRestored.copy(googleVpnMissing = false).shouldLock)
+    }
 }

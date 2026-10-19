@@ -1,8 +1,17 @@
 package com.example.installlock
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.VpnService
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -16,31 +25,91 @@ import java.util.concurrent.Executors
 class DnsFilterService : VpnService() {
 
     companion object {
-        const val TARGET_PKG = "com.google.android.googlequicksearchbox"
+        const val TARGET_PKG = BrowserPackages.GOOGLE_APP
         private const val CLIENT_ADDR = "10.111.222.1"
         private const val DNS_ADDR = "10.111.222.2"
         private val DNS_BYTES = byteArrayOf(10, 111, 222.toByte(), 2)
+        @Volatile private var activeService: DnsFilterService? = null
+
+        /** Permission alone or another VPN is insufficient: our DNS reader must be alive. */
+        fun isReady(context: Context): Boolean = try {
+            activeService?.hasLiveTunnel() == true && prepare(context) == null
+        } catch (_: RuntimeException) { false }
+
+        internal fun disconnect() { activeService?.closeTunnel() }
     }
 
-    private var tun: ParcelFileDescriptor? = null
+    @Volatile private var tun: ParcelFileDescriptor? = null
+    @Volatile private var reader: Thread? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val pool = Executors.newFixedThreadPool(8)
     @Volatile private var running = false
 
+    override fun onCreate() {
+        super.onCreate()
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(
+            "google_vpn", "Google VPN filter", NotificationManager.IMPORTANCE_LOW))
+        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val notification = Notification.Builder(this, "google_vpn")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setContentTitle("Install Lock Google VPN")
+            .setContentText("Required for Google access. Keyword protection also applies.")
+            .setContentIntent(open)
+            .setOngoing(true)
+            .build()
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(2, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+        } else startForeground(2, notification)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (tun == null) startFilter()
+        if (tun != null && !hasLiveTunnel()) closeTunnel()
+        if (tun == null && !startFilter()) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         return START_STICKY
     }
 
+    override fun onRevoke() {
+        // Android may call this off the main thread, including when another VPN takes over.
+        closeTunnel()
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
-        running = false
-        try { tun?.close() } catch (_: Exception) { }
-        tun = null
+        closeTunnel()
         pool.shutdownNow()
         super.onDestroy()
     }
 
-    private fun startFilter() {
-        try {
+    @Synchronized
+    private fun hasLiveTunnel(): Boolean = running && tun?.fileDescriptor?.valid() == true && reader?.isAlive == true
+
+    /** Ignore an old reader finishing after a replacement connection has started. */
+    @Synchronized
+    private fun closeTunnel(expected: ParcelFileDescriptor? = null): Boolean {
+        if (expected != null && tun !== expected) return false
+        running = false
+        val old = tun
+        tun = null
+        reader?.interrupt()
+        reader = null
+        if (activeService === this) activeService = null
+        try { old?.close() } catch (_: Exception) { }
+        notifyPolicy()
+        return true
+    }
+
+    private fun notifyPolicy() {
+        mainHandler.post { Policy.sweep(applicationContext) }
+    }
+
+    @Synchronized
+    private fun startFilter(): Boolean {
+        return try {
             val fd = Builder()
                 .setSession("Install Lock DNS filter")
                 .setMtu(1500)
@@ -49,20 +118,27 @@ class DnsFilterService : VpnService() {
                 .addRoute(DNS_ADDR, 32)               // only DNS goes through us
                 .addAllowedApplication(TARGET_PKG)    // and only from the Google app
                 .setBlocking(true)
-                .establish() ?: return
+                .establish() ?: run { notifyPolicy(); return false }
             tun = fd
             running = true
-            Thread { loop(fd) }.start()
-        } catch (_: Exception) { }
+            reader = Thread({ loop(fd) }, "InstallLock-DNS").also { it.start() }
+            activeService = this
+            notifyPolicy()
+            true
+        } catch (_: Exception) {
+            closeTunnel()
+            false
+        }
     }
 
     private fun loop(fd: ParcelFileDescriptor) {
-        val input = FileInputStream(fd.fileDescriptor)
-        val output = FileOutputStream(fd.fileDescriptor)
-        val buf = ByteArray(32767)
         try {
-            while (running) {
+            val input = FileInputStream(fd.fileDescriptor)
+            val output = FileOutputStream(fd.fileDescriptor)
+            val buf = ByteArray(32767)
+            while (running && tun === fd) {
                 val n = input.read(buf)
+                if (!running || tun !== fd) break
                 if (n < 0) break
                 if (n < 28) continue
                 if ((buf[0].toInt() shr 4) != 4) continue          // IPv4 only
@@ -77,6 +153,9 @@ class DnsFilterService : VpnService() {
                 pool.execute { handle(output, query, clientIp, clientPort) }
             }
         } catch (_: Exception) { }
+        finally {
+            if (closeTunnel(fd)) mainHandler.post { if (tun == null) stopSelf() }
+        }
     }
 
     private fun handle(out: FileOutputStream, query: ByteArray, clientIp: ByteArray, clientPort: Int) {
