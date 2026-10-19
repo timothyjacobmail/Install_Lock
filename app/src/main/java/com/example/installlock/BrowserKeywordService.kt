@@ -24,11 +24,14 @@ class BrowserKeywordService : AccessibilityService() {
     private var handlingMatch = false
     private var registered = false
     private var lastWords = emptySet<String>()
-    private var matcher = KeywordMatcher(emptySet())
+    private var lastExceptions = emptyMap<String, Set<String>>()
+    private var lastGenericExceptions = emptySet<String>()
+    private var pageFilter = KeywordPageFilter(emptySet())
     private val prefs by lazy { getSharedPreferences("install_lock", Context.MODE_PRIVATE) }
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key == "browserKeywords" || key == "keywordRemovalRequests") scheduleScan(0)
+        if (key == "browserKeywords" || key == "keywordRemovalRequests" ||
+            key == "keywordExceptions" || key == "genericKeywordExceptions") scheduleScan(0)
         if (key == "keywordFilterEnabled") {
             if (Store.browserKeywordFilterEnabled(this)) scheduleScan(0) else onInterrupt()
         }
@@ -87,16 +90,23 @@ class BrowserKeywordService : AccessibilityService() {
             val browser = root.packageName?.toString() ?: return
             if (browser !in targets) return
             val words = Store.browserKeywords(this)
-            if (words != lastWords) {
+            val exceptions = Store.keywordExceptions(this)
+            val genericExceptions = Store.genericKeywordExceptions(this)
+            if (words != lastWords || exceptions != lastExceptions || genericExceptions != lastGenericExceptions) {
                 lastWords = words
-                matcher = KeywordMatcher(words)
+                lastExceptions = exceptions
+                lastGenericExceptions = genericExceptions
+                pageFilter = KeywordPageFilter(words, exceptions, genericExceptions)
             }
-            val text = visiblePageText(root)
-            val match = matcher.findMatch(text)
+            val google = browser == BrowserPackages.GOOGLE_APP
+            val query = if (google) googleSearchQuery(root) else null
+            val queryText = if (google) GoogleResultText(listOfNotNull(query, lastSubmittedGoogleQuery)) else null
+            val text = visiblePageText(root, queryText)
+            val match = pageFilter.findBlock(text)
             if (match != null) {
                 // Home leaves Google's blocked results open, causing a loop on re-entry.
                 // Offer a separate search editor that can replace those results instead.
-                if (browser == BrowserPackages.GOOGLE_APP) recoverGoogleSearch(match)
+                if (google) recoverGoogleSearch(match, query ?: lastSubmittedGoogleQuery)
                 else closeTabOrLeave(root, browser, match)
             }
             else scheduleScan(500)
@@ -106,30 +116,57 @@ class BrowserKeywordService : AccessibilityService() {
         } finally { root.recycle() }
     }
 
-    private fun visiblePageText(root: AccessibilityNodeInfo): String {
+    private fun visiblePageText(root: AccessibilityNodeInfo, queryText: GoogleResultText?): String {
         val text = StringBuilder()
+        val google = root.packageName?.toString() == BrowserPackages.GOOGLE_APP
         var visited = 0
         fun walk(node: AccessibilityNodeInfo, insidePage: Boolean, depth: Int) {
             if (depth > 64 || ++visited > 4000 || text.length >= 131072) return
             if (node.isPassword || node.isEditable || node.className?.toString() == "android.widget.EditText") return
             val className = node.className?.toString().orEmpty()
-            val page = insidePage || className == "android.webkit.WebView" || className.endsWith("GeckoView")
-            if (page && node.isVisibleToUser) {
+            val webPage = insidePage || className == "android.webkit.WebView" || className.endsWith("GeckoView")
+            if (google && !webPage && GoogleQueryField.matches(className, node.viewIdResourceName, node.isEditable)) return
+            if ((google || webPage) && node.isVisibleToUser) {
                 for (value in listOfNotNull(node.text, node.contentDescription)) {
                     val available = 131072 - text.length
-                    if (available > 1) text.append(value.take(available - 1)).append(' ')
+                    val content = queryText?.forMatching(value.toString()) ?: value.toString()
+                    if (available > 1) text.append(content.take(available - 1)).append(' ')
                 }
             }
             for (index in 0 until node.childCount) {
                 if (visited >= 4000 || text.length >= 131072) break
                 val child = node.getChild(index) ?: continue
-                try { walk(child, page, depth + 1) } finally { child.recycle() }
+                try { walk(child, webPage, depth + 1) } finally { child.recycle() }
             }
         }
         // Google also renders results and Discover cards as native views. Browser chrome
         // remains excluded for other packages, so address bars and menus aren't scanned.
-        walk(root, root.packageName?.toString() == BrowserPackages.GOOGLE_APP, 0)
-        return text.toString()
+        walk(root, false, 0)
+        // A query can also be split across multiple nodes in Google's accessibility tree.
+        return queryText?.forMatching(text.toString()) ?: text.toString()
+    }
+
+    /** Read only the current native query control, never guess the query from result snippets. */
+    private fun googleSearchQuery(root: AccessibilityNodeInfo): String? {
+        var visited = 0
+        fun walk(node: AccessibilityNodeInfo, insideQuery: Boolean, depth: Int): String? {
+            if (depth > 64 || ++visited > 2000 || node.isPassword) return null
+            val className = node.className?.toString().orEmpty()
+            if (className == "android.webkit.WebView" || className.endsWith("GeckoView")) return null
+            val queryField = insideQuery || GoogleQueryField.matches(className, node.viewIdResourceName, node.isEditable)
+            if (queryField && node.isVisibleToUser && !node.isShowingHintText) {
+                val value = node.text?.toString()?.trim()
+                if (!value.isNullOrEmpty() && value.length <= 2048 &&
+                    value.lowercase() !in setOf("search", "search...", "search…")) return value
+            }
+            for (index in 0 until node.childCount) {
+                if (visited >= 2000) break
+                val child = node.getChild(index) ?: continue
+                try { walk(child, queryField, depth + 1)?.let { return it } } finally { child.recycle() }
+            }
+            return null
+        }
+        return walk(root, false, 0)
     }
 
     /** Native browser controls only: a page cannot impersonate a close-tab menu item. */
@@ -201,12 +238,12 @@ class BrowserKeywordService : AccessibilityService() {
         return try { clickMenuItem(parent, depth + 1) } finally { parent.recycle() }
     }
 
-    private fun recoverGoogleSearch(word: String) {
+    private fun recoverGoogleSearch(word: String, query: String?) {
         handlingMatch = true
         val root = rootInActiveWindow
         try {
             if (root?.packageName?.toString() == BrowserPackages.GOOGLE_APP) {
-                startActivity(GoogleSearchRecoveryActivity.openIntent(this, word))
+                startActivity(GoogleSearchRecoveryActivity.openIntent(this, word, query))
             }
         } catch (_: RuntimeException) {
             // The same search editor is also available from Install Lock if Android
@@ -259,6 +296,11 @@ class BrowserKeywordService : AccessibilityService() {
 
     companion object {
         @Volatile private var connected = false
+        // One query in memory only, so query echoes can be recognized even when Google's
+        // current version doesn't expose a native query control. No search history is saved.
+        @Volatile private var lastSubmittedGoogleQuery: String? = null
+
+        internal fun rememberGoogleSearch(query: String) { lastSubmittedGoogleQuery = query }
 
         fun isReady(context: Context): Boolean = connected && isEnabled(context)
 

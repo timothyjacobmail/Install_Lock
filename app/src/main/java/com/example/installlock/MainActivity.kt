@@ -11,6 +11,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.ArrayAdapter
+import android.widget.AdapterView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -20,6 +21,7 @@ import android.widget.ListView
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Switch
+import android.widget.Spinner
 import android.widget.Toast
 import android.window.OnBackInvokedDispatcher
 import java.text.DateFormat
@@ -975,35 +977,36 @@ class MainActivity : Activity() {
         val filterOn = Store.browserKeywordFilterEnabled(this)
         val ready = BrowserKeywordService.isReady(this)
         fun timeLabel(time: Long) = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(time))
-        val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (entry in entries) {
-            val rowLabel = entry.word + if (entry.removeAt != null)
-                " — removal at ${timeLabel(entry.removeAt)}" else " — blocked"
-            list.addView(button(rowLabel) {
-                if (entry.removeAt != null) {
-                    AlertDialog.Builder(this)
-                        .setTitle(entry.word)
-                        .setMessage("This word remains blocked until ${timeLabel(entry.removeAt)}. Cancel its removal to keep it blocked?")
-                        .setPositiveButton("Keep blocked") { _, _ ->
-                            // Re-adding also restores a word if its removal expired while this dialog was open.
-                            Store.addBrowserKeyword(this, entry.word)
-                            reopen()
-                        }
-                        .setNegativeButton("Back", null).show()
-                } else {
-                    AlertDialog.Builder(this)
-                        .setTitle("Remove ${entry.word}?")
-                        .setMessage("It will remain blocked for $wait minutes, then be removed automatically. " +
-                                "You can cancel the removal while you wait.")
-                        .setPositiveButton("Start removal wait") { _, _ ->
-                            Store.requestKeywordRemoval(this, entry.word)
-                            reopen()
-                        }
-                        .setNegativeButton("Cancel", null).show()
-                }
-            })
+        val list = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, entries.map { entry ->
+                entry.word + if (entry.removeAt != null) " — removal at ${timeLabel(entry.removeAt)}" else " — blocked"
+            }).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            isEnabled = entries.isNotEmpty()
         }
-        if (entries.isEmpty()) list.addView(label("No blocked words."))
+        val manageWord = button("Manage selected word") {
+            val entry = entries.getOrNull(list.selectedItemPosition) ?: return@button
+            if (entry.removeAt != null) {
+                AlertDialog.Builder(this)
+                    .setTitle(entry.word)
+                    .setMessage("This word remains blocked until ${timeLabel(entry.removeAt)}. Cancel its removal to keep it blocked?")
+                    .setPositiveButton("Keep blocked") { _, _ ->
+                        // Re-adding also restores a word if its removal expired while this dialog was open.
+                        Store.addBrowserKeyword(this, entry.word)
+                        reopen()
+                    }
+                    .setNegativeButton("Back", null).show()
+            } else {
+                AlertDialog.Builder(this)
+                    .setTitle("Remove ${entry.word}?")
+                    .setMessage("It will remain blocked for $wait minutes, then be removed automatically. " +
+                            "You can cancel the removal while you wait.")
+                    .setPositiveButton("Start removal wait") { _, _ ->
+                        Store.requestKeywordRemoval(this, entry.word)
+                        reopen()
+                    }
+                    .setNegativeButton("Cancel", null).show()
+            }
+        }.apply { isEnabled = entries.isNotEmpty() }
         val field = EditText(this).apply {
             hint = "Word or phrase to block"
             inputType = InputType.TYPE_CLASS_TEXT
@@ -1051,7 +1054,8 @@ class MainActivity : Activity() {
         })
         col.addView(label("Checks visible browser webpages and Google app content, including search results and Discover, " +
                 "for whole words or phrases regardless of case. Both use the same blocked-word list. " +
-                "Typed fields are ignored. A match in Google opens a blocked-results screen where you can enter a new search. " +
+                "Typed fields are ignored. A match in Google opens a blocked-results screen where you can edit your search " +
+                "or retry with the triggering word excluded. " +
                 "In browsers, it tries the current-tab close action; " +
                 "otherwise returns Home. Detection depends on readable accessibility content. " +
                 "Inspected text stays on this device and is not saved."))
@@ -1066,12 +1070,19 @@ class MainActivity : Activity() {
                 "browsers and the Google app are blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
                 "above to turn keyword protection off. Google also requires Install Lock's built-in VPN. " +
                 "Other app locks and Chrome whitelist rules still apply. " +
-                "Tap a word to request removal ($wait-minute wait); tap a pending removal to cancel it."))
+                "Select a word from the dropdown, then Manage selected word to request removal ($wait-minute wait) " +
+                "or cancel a pending removal. Page exceptions can allow a blocked word when another configured word is also visible."))
         col.addView(field)
         col.addView(msg)
         col.addView(add)
-        col.addView(label("Blocked words", 20f))
+        col.addView(label("Blocked words (${entries.size})", 20f))
+        if (entries.isEmpty()) col.addView(label("No blocked words."))
         col.addView(list)
+        col.addView(manageWord)
+        col.addView(button("Page exceptions") {
+            val selected = entries.getOrNull(list.selectedItemPosition)?.word
+            goTo { showKeywordExceptions(selected) }
+        })
         col.addView(button("Refresh") { reopen() })
         col.addView(button("Back") { back() })
         show(ScrollView(this).apply { isFillViewport = true; addView(col) })
@@ -1079,6 +1090,82 @@ class MainActivity : Activity() {
         if (nextRemoval != null) list.postDelayed({
             if (list.isAttachedToWindow && hasWindowFocus() && field.text.isBlank() && !field.hasFocus()) reopen()
         }, (nextRemoval - System.currentTimeMillis()).coerceIn(100L, 60_000L))
+    }
+
+    // ---------- page keyword exceptions ----------
+
+    private fun showKeywordExceptions(initialWord: String? = null) {
+        val words = Store.browserKeywords(this).sorted()
+        if (words.isEmpty()) {
+            screen(label("Page exceptions", 22f), label("Add a blocked word first."), button("Back") { back() })
+            return
+        }
+        val selected = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, words).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            setSelection(words.indexOf(initialWord).coerceAtLeast(0))
+        }
+        val allowed = EditText(this).apply { hint = "Exception word or phrase, e.g. christian" }
+        val password = passwordField("Filter password")
+        val msg = label("")
+        val rules = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun drawRules() {
+            rules.removeAllViews()
+            val blocked = words.getOrNull(selected.selectedItemPosition) ?: return
+            val exceptions = Store.keywordExceptions(this)[blocked].orEmpty().sorted()
+            if (exceptions.isEmpty()) rules.addView(label("No page exceptions for $blocked."))
+            for (word in exceptions) {
+                rules.addView(button("Remove exception: $word") {
+                    Store.removeKeywordException(this, blocked, word)
+                    msg.text = "Removed the exception immediately."
+                    drawRules()
+                })
+            }
+        }
+        selected.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) { drawRules() }
+            override fun onNothingSelected(parent: AdapterView<*>?) { drawRules() }
+        }
+        val views = mutableListOf<View>(
+            label("Page exceptions", 22f),
+            label("Choose a blocked word, then a word that allows it on the same visible page. " +
+                    "Example: movie → christian allows movie when christian also appears. " +
+                    "Any one exception for that blocked word is enough. Other blocked words are still checked. " +
+                    "Matching uses whole words or phrases, regardless of case. " +
+                    "Adding an exception requires the filter password; removing one is immediate. " +
+                    "App locks, accessibility requirements, the Google VPN requirement and site restrictions still apply."),
+            label("Blocked word"), selected,
+            label("Current exceptions", 20f), rules,
+            allowed, msg
+        )
+        if (Store.hasPassword(this, Store.Pw.FILTER)) {
+            views.add(password)
+            views.add(button("Add exception (filter password)") {
+                val blocked = words.getOrNull(selected.selectedItemPosition) ?: return@button
+                val exception = KeywordMatcher.normalizeWord(allowed.text.toString())
+                when {
+                    exception == null -> msg.text = "Use 1–80 characters: letters, numbers, spaces, apostrophes or hyphens."
+                    exception == blocked -> msg.text = "Choose a different word from the blocked word."
+                    blocked !in Store.browserKeywords(this) -> msg.text = "This blocked word has been removed. Tap Refresh."
+                    exception in Store.keywordExceptions(this)[blocked].orEmpty() -> msg.text = "This exception already exists."
+                    Store.lockoutRemainingMs(this, Store.Pw.FILTER) > 0 -> msg.text = "Too many attempts. Try again later."
+                    !Store.addKeywordException(this, blocked, exception, password.text.toString()) -> msg.text = "Wrong filter password."
+                    else -> {
+                        allowed.setText("")
+                        password.setText("")
+                        msg.text = "$blocked is allowed when $exception also appears on the page."
+                        drawRules()
+                    }
+                }
+            })
+        } else {
+            views.add(button("Set filter password to add exceptions") { goTo { showFilterPasswordSetup() } })
+        }
+        views.add(button("Refresh") { reopen() })
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
+        drawRules()
     }
 
     // ---------- password-protected timing settings ----------

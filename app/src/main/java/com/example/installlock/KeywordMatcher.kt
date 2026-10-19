@@ -13,8 +13,13 @@ internal class KeywordMatcher(words: Set<String>) {
         return patterns.firstOrNull { it.second.containsMatchIn(normalized) }?.first
     }
 
+    fun findMatches(text: String): Set<String> {
+        val normalized = normalizeText(text)
+        return patterns.mapNotNull { if (it.second.containsMatchIn(normalized)) it.first else null }.toSet()
+    }
+
     companion object {
-        private fun normalizeText(text: String): String =
+        internal fun normalizeText(text: String): String =
             Normalizer.normalize(text, Normalizer.Form.NFKC)
                 .replace(Regex("\\p{Cf}"), "")
                 .lowercase(Locale.ROOT).replace(Regex("\\s+"), " ").trim()

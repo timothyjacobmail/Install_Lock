@@ -314,6 +314,8 @@ object Store {
         if (due.isEmpty()) return
         val words = p(c).getStringSet("browserKeywords", DEFAULT_BROWSER_KEYWORDS)!!.toSet()
         p(c).edit().putStringSet("browserKeywords", words - due)
+            .putStringSet("keywordExceptions", p(c).getStringSet("keywordExceptions", emptySet())!!
+                .filterNot { it.substringBefore('|') in due }.toSet())
             .putStringSet("keywordRemovalRequests", removals.filterKeys { it !in due }
                 .map { (word, deadline) -> "$deadline|$word" }.toSet()).apply()
     }
@@ -327,6 +329,54 @@ object Store {
     }
 
     fun browserKeywords(c: Context): Set<String> = browserKeywordEntries(c).map { it.word }.toSet()
+
+    fun genericKeywordExceptions(c: Context): Set<String> =
+        p(c).getStringSet("genericKeywordExceptions", emptySet())!!
+            .mapNotNull { KeywordMatcher.normalizeWord(it) }.toSet()
+
+    @Synchronized
+    fun addGenericKeywordException(c: Context, input: String, password: String): Boolean {
+        val word = KeywordMatcher.normalizeWord(input) ?: return false
+        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        p(c).edit().putStringSet("genericKeywordExceptions", genericKeywordExceptions(c) + word).apply()
+        return true
+    }
+
+    @Synchronized
+    fun removeGenericKeywordException(c: Context, word: String) {
+        val normalized = KeywordMatcher.normalizeWord(word) ?: return
+        p(c).edit().putStringSet("genericKeywordExceptions", genericKeywordExceptions(c) - normalized).apply()
+    }
+
+    fun keywordExceptions(c: Context): Map<String, Set<String>> {
+        val active = browserKeywords(c)
+        return p(c).getStringSet("keywordExceptions", emptySet())!!.mapNotNull { raw ->
+            val parts = raw.split('|')
+            if (parts.size != 2) return@mapNotNull null
+            val blocked = KeywordMatcher.normalizeWord(parts[0]) ?: return@mapNotNull null
+            val allowed = KeywordMatcher.normalizeWord(parts[1]) ?: return@mapNotNull null
+            if (blocked in active && blocked != allowed) blocked to allowed else null
+        }.groupBy({ it.first }, { it.second }).mapValues { it.value.toSet() }
+    }
+
+    /** Adding an exception weakens protection and needs the existing filter password. */
+    @Synchronized
+    fun addKeywordException(c: Context, blockedInput: String, allowedInput: String, password: String): Boolean {
+        val blocked = KeywordMatcher.normalizeWord(blockedInput) ?: return false
+        val allowed = KeywordMatcher.normalizeWord(allowedInput) ?: return false
+        if (blocked == allowed || blocked !in browserKeywords(c)) return false
+        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        val saved = p(c).getStringSet("keywordExceptions", emptySet())!!.toSet()
+        p(c).edit().putStringSet("keywordExceptions", saved + "$blocked|$allowed").apply()
+        return true
+    }
+
+    /** Removing an exception strengthens protection, so it is immediate and password-free. */
+    @Synchronized
+    fun removeKeywordException(c: Context, blocked: String, allowed: String) {
+        val saved = p(c).getStringSet("keywordExceptions", emptySet())!!.toSet()
+        p(c).edit().putStringSet("keywordExceptions", saved - "$blocked|$allowed").apply()
+    }
 
     @Synchronized
     fun addBrowserKeyword(c: Context, input: String): Boolean {

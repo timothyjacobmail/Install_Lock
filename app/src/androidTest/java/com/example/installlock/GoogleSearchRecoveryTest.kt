@@ -22,12 +22,20 @@ class GoogleSearchRecoveryTest {
 
     @Test fun blockedResultOpensPrivateEditorWithoutLaunchingGoogleAgain() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val recovery = GoogleSearchRecoveryActivity.openIntent(context, "anime")
+        val recovery = GoogleSearchRecoveryActivity.openIntent(context, "anime", "bleach")
         val component = recovery.component!!
         assertEquals(context.packageName, component.packageName)
         assertEquals(GoogleSearchRecoveryActivity::class.java.name, component.className)
         assertFalse(context.packageManager.getActivityInfo(component, 0).exported)
         assertFalse(recovery.hasExtra(SearchManager.QUERY))
+        assertEquals("bleach", recovery.getStringExtra("original_query"))
         assertTrue(recovery.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0)
+    }
+
+    @Test fun excludedTermIsPassedToGoogleAsAnOperator() {
+        val query = GoogleSearchQuery.excluding("bleach", "anime")!!
+        val intent = GoogleSearchRecoveryActivity.searchIntent(query)
+        assertEquals("bleach -anime", intent.getStringExtra(SearchManager.QUERY))
+        assertEquals(BrowserPackages.GOOGLE_APP, intent.`package`)
     }
 }
