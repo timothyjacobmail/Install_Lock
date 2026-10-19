@@ -20,6 +20,8 @@ internal object PlayCategoryLookup {
 
     fun exemption(context: Context, pkg: PackageInfo): PlayInstallCategory? {
         val c = context.applicationContext
+        val selected = Store.immediatePlayCategories(c)
+        if (selected.isEmpty()) return null
         val installer = installer(c, pkg.packageName)
         if (installer != PlayCategoryRules.PLAY_STORE) return null
         val prefs = c.getSharedPreferences("play_categories", Context.MODE_PRIVATE)
@@ -45,7 +47,7 @@ internal object PlayCategoryLookup {
                 }
             }
         }
-        return PlayCategoryRules.exemption(installer, record?.category)
+        return PlayCategoryRules.exemption(installer, record?.category, selected)
     }
 
     private fun installer(c: Context, packageName: String): String? =

@@ -12,12 +12,16 @@ data class AppLockReasons(
     val otherBrowser: Boolean = false,
     val curboxMissing: Boolean = false,
     val neverInstallRule: String? = null,
-    val googleVpnMissing: Boolean = false
+    val googleVpnMissing: Boolean = false,
+    val domainServiceMissing: Boolean = false
 ) {
     val shouldLock: Boolean get() = keywordServiceMissing || appLock || installWaitUntil != null ||
-            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing
+            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing
 
     fun descriptions(): List<String> = buildList {
+        if (domainServiceMissing) add("Ordered domain rules require Install Lock's browser accessibility service. " +
+                if (accessibilityEnabled) "The service is enabled but has not connected; wait for it or re-enable it."
+                else "The service is disabled. Enable it in Android Accessibility settings.")
         if (googleVpnMissing) add("Install Lock's built-in VPN is not running. " +
                 "Open Google VPN filter in Install Lock and turn it on. Google requires this VPN even during a temporary app unlock.")
         if (keywordServiceMissing) add(

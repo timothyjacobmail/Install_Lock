@@ -22,6 +22,28 @@ class SettingsStoreTest {
     fun cleanUp() { prefs.edit().clear().commit() }
 
     @Test
+    fun categoryChoicesDefaultToTheOriginalThreeAndPersistWithoutAffectingOtherSettings() {
+        assertEquals(setOf("MUSIC_AND_AUDIO", "FINANCE", "SHOPPING"), Store.immediatePlayCategories(context))
+        Store.setPassword(context, "SettingsPass3", Store.Pw.SETTINGS)
+        Store.saveImmediatePlayCategories(context, setOf("EDUCATION", "GAME_PUZZLE", "UNKNOWN"))
+        assertEquals(setOf("EDUCATION", "GAME_PUZZLE"), Store.immediatePlayCategories(context))
+        assertEquals(setOf("EDUCATION", "GAME_PUZZLE"), prefs.getStringSet("immediatePlayCategories", emptySet()))
+        Store.saveTimingConfig(context, TimingConfig())
+        assertEquals(setOf("EDUCATION", "GAME_PUZZLE"), Store.immediatePlayCategories(context))
+        assertTrue(Store.checkPassword(context, "SettingsPass3", Store.Pw.SETTINGS))
+    }
+
+    @Test
+    fun deselectingEveryCategoryRemainsEmptyInsteadOfReenablingDefaults() {
+        Store.saveImmediatePlayCategories(context, emptySet())
+        assertTrue(Store.immediatePlayCategories(context).isEmpty())
+        assertTrue(prefs.contains("immediatePlayCategories"))
+        assertTrue(Store.immediatePlayCategories(context).isEmpty())
+        Store.saveImmediatePlayCategories(context, PlayCategoryRules.defaultCategories)
+        assertEquals(PlayCategoryRules.defaultCategories, Store.immediatePlayCategories(context))
+    }
+
+    @Test
     fun blankPasswordsAreRejectedWithoutConsumingAttemptsForAnyPasswordRole() {
         for (role in Store.Pw.entries) {
             Store.setPassword(context, "Password123", role)

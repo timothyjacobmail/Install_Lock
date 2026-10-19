@@ -10,6 +10,17 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ChromeRestrictionsTest {
     @Test
+    fun sharedPathChoiceReachesChromeWithItsCaseAndTrailingSlashIntact() {
+        val choices = SharedSite.whitelistOptions("https://www.example.com/Topics/Sharks/Post?tracking=private")
+        val selected = Store.normalizeSite(choices[1])!!
+        assertEquals("example.com/Topics/Sharks/", selected)
+        val restrictions = ChromeRestrictions.update(Bundle(), true, listOf(selected))!!
+        assertEquals(selected, JSONArray(restrictions.getString("URLAllowlist")).getString(0))
+        val blocked = ChromeRestrictions.update(restrictions, true, listOf(selected), listOf("example.com"))!!
+        assertEquals("[]", blocked.getString("URLAllowlist"))
+    }
+
+    @Test
     fun missingPolicyIsRestoredWithoutTogglingLock() {
         val restored = ChromeRestrictions.update(Bundle(), true, listOf("example.com"))!!
         assertEquals("*", JSONArray(restored.getString("URLBlocklist")).getString(0))

@@ -161,7 +161,8 @@ class DnsFilterService : VpnService() {
     private fun handle(out: FileOutputStream, query: ByteArray, clientIp: ByteArray, clientPort: Int) {
         try {
             val parsed = parseQuestion(query)
-            if (parsed != null && Store.isBlocked(this, parsed.first)) {
+            if (parsed != null && (Store.isBlocked(this, parsed.first) ||
+                        DomainRules(Store.domainRules(this)).match(parsed.first)?.rule?.action == DomainAction.BLOCK)) {
                 DnsLog.add(parsed.first, true)
                 reply(out, clientIp, clientPort, nxdomain(query, parsed.second))
                 return

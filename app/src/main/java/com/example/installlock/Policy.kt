@@ -81,7 +81,9 @@ object Policy {
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
         val previousKeywordGuard = Store.keywordGuardPackages(c)
         val accessibilityEnabled = BrowserKeywordService.isEnabled(c)
-        val keywordBrowsers = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
+        val keywordFilterOn = Store.browserKeywordFilterEnabled(c)
+        val domainRulesOn = Store.domainRules(c).isNotEmpty()
+        val keywordBrowsers = if ((keywordFilterOn || domainRulesOn) && !BrowserKeywordService.isReady(c))
             BrowserPackages.keywordTargets(c) + previousKeywordGuard else emptySet()
         val keywordReleaseRetries = mutableSetOf<String>()
         val googleVpnMissing = !DnsFilterService.isReady(c)
@@ -136,7 +138,8 @@ object Policy {
             val newInstall = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now, installWaitMs) != null
             val categoryExemption = if (newInstall && neverRule == null) PlayCategoryLookup.exemption(c, pkg) else null
             val reasons = AppLockReasons(
-                keywordServiceMissing = keywordPaused,
+                keywordServiceMissing = keywordPaused && keywordFilterOn,
+                domainServiceMissing = keywordPaused && domainRulesOn && !keywordFilterOn,
                 accessibilityEnabled = accessibilityEnabled,
                 appLock = isProtected && gateClosed,
                 installWaitUntil = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now,
@@ -155,7 +158,7 @@ object Policy {
             } catch (_: Exception) {
                 if (name in previousKeywordGuard) keywordReleaseRetries.add(name)
             }
-            record(pkg, info, reasons, categoryExemption?.title)
+            record(pkg, info, reasons, categoryExemption?.displayName)
             if (neverRule != null) requestUninstall(c, name)
         }
         Store.setKeywordGuardPackages(c, keywordBrowsers + keywordReleaseRetries)
@@ -280,7 +283,7 @@ object Policy {
     fun release(c: Context, packages: Collection<String>) {
         if (!isOwner(c) || packages.isEmpty()) return
         try {
-            val keywordGuard = if (Store.browserKeywordFilterEnabled(c) && !BrowserKeywordService.isReady(c))
+            val keywordGuard = if ((Store.browserKeywordFilterEnabled(c) || Store.domainRules(c).isNotEmpty()) && !BrowserKeywordService.isReady(c))
                 BrowserPackages.keywordTargets(c) + Store.keywordGuardPackages(c) else emptySet()
             val vpnGuard = if (!DnsFilterService.isReady(c)) setOf(BrowserPackages.GOOGLE_APP) else emptySet()
             val releasable = packages.filter { it !in keywordGuard && it !in vpnGuard }

@@ -14,6 +14,7 @@ import android.view.WindowInsets
 import android.widget.ArrayAdapter
 import android.widget.AdapterView
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -23,15 +24,21 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Switch
 import android.widget.Spinner
+import android.widget.RadioButton
+import android.widget.RadioGroup
+import android.widget.ProgressBar
 import android.widget.Toast
 import android.window.OnBackInvokedDispatcher
 import java.text.DateFormat
 import java.util.Date
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 class MainActivity : Activity() {
 
     companion object {
         // Cleared when the app leaves the screen
         private var authed = false
+        private val shareLinkExecutor = Executors.newSingleThreadExecutor()
     }
 
     // ---------- navigation ----------
@@ -39,8 +46,11 @@ class MainActivity : Activity() {
     private val history = ArrayDeque<() -> Unit>()
     private var current: (() -> Unit)? = null
     private var receivedSiteShare = false
-    private var sharedDomain: String? = null
+    private var sharedSiteOptions = emptyList<String>()
+    private var sharedSiteText: String? = null
+    private var shareLinkTask: Future<*>? = null
     private var settingsAuthed = false
+    private val sectionStates = mutableMapOf<String, Boolean>()
 
     /** Go forward to a new screen. Back returns to the one we left. */
     private fun goTo(screen: () -> Unit) {
@@ -64,42 +74,67 @@ class MainActivity : Activity() {
         statuses.firstOrNull { it.packageName == Policy.CHROME }?.explanation()
             ?: "Chrome is not installed."
 
+    private fun playAccessSummary(): String {
+        val selected = Store.immediatePlayCategories(this)
+        val titles = PlayInstallCategory.entries.filter { it.storeId in selected }.map { it.displayName }
+        return if (titles.isEmpty()) "No Play Store categories skip the new-app waiting period."
+        else "Immediate Play Store access: ${titles.joinToString()}. Category verification needs internet; other locks still apply."
+    }
+
+    private fun browserActions() = section("Browser & Google", "Website rules, keyword filtering and Google VPN",
+        button("Ordered domain rules") { goTo { showDomainRules() } },
+        button("Chrome whitelist") { goTo { showChromeSites() } },
+        button("Extra locked sites") { goTo { showExtraLockedSites() } },
+        button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
+        button("Google VPN filter") { goTo { showGoogleFilter() } },
+        button("Start a new Google search") { startActivity(GoogleSearchRecoveryActivity.openIntent(this)) })
+
     /** Read-only and available before login, so a blocked browser always has a recovery explanation. */
     private fun showLockReasons() {
         val statuses = Policy.lockStatuses(this)
         val views = mutableListOf<View>(
             label("Why apps are locked", 22f),
-            label("All current reasons are listed below. Each active reason must be cleared before an app can open. " +
-                    "Tap Refresh after changing a setting or waiting for a timer."),
+            label("Expand an app to see its lock reasons and recovery steps."),
             label("Checked at " + DateFormat.getTimeInstance().format(Date())),
-            label("Google Play apps in Music & Audio, Finance and Shopping skip the new-app wait once their category is verified. " +
-                    "The first check needs internet access and may take a few seconds. If verification is unavailable, " +
-                    "the normal wait applies. Other locks still apply."),
             button("Refresh") { reopen() },
+            section("Recovery options", "Settings and filters that can keep an app locked",
             button("Android accessibility settings") {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             },
             button("App locks") { goTo { showAppPicker() } },
+            button("Ordered domain rules") { goTo { showDomainRules() } },
             button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
             button("Google VPN filter") { goTo { showGoogleFilter() } },
             button("Chrome whitelist") { goTo { showChromeSites() } },
-            button("Extra locked sites") { goTo { showExtraLockedSites() } }
+            button("Extra locked sites") { goTo { showExtraLockedSites() } }),
+            section("How lock rules work", "Install waits and website restrictions",
+                label("Each active lock reason must be cleared before an app can open. Tap Refresh after changing a setting or waiting."),
+                label(playAccessSummary()),
+                label("Category checks may take a few seconds. Unverified apps keep the normal install wait."))
         )
-        if (Store.chromeLock(this)) views.add(label(
+        val websiteRules = mutableListOf<View>()
+        if (Store.chromeLock(this)) websiteRules.add(label(
             "Chrome website restriction: only active whitelist entries can open. " +
                     "A site that is missing or still waiting will be blocked even when Chrome itself is unlocked. " +
                     "Open Chrome whitelist to see each site's activation time."
         ))
         val extraSites = Store.extraLockedSites(this)
-        if (extraSites.isNotEmpty()) views.add(label(
+        if (extraSites.isNotEmpty()) websiteRules.add(label(
             "Chrome extra site locks: ${extraSites.joinToString { it.domain }}. " +
                     "These override whitelist entries and remain active until their removal wait ends. " +
                     "Open Extra locked sites to see removal deadlines."
         ))
+        if (websiteRules.isNotEmpty()) views.add(section("Website rules", "Chrome whitelist and extra site locks", *websiteRules.toTypedArray()))
         if (statuses.none { it.needsAttention }) views.add(label("No app is currently locked by Install Lock."))
         for (status in statuses) {
-            views.add(label(status.explanation()))
-            views.add(label(status.packageName, 12f))
+            val summary = when {
+                status.reasons.shouldLock && status.suspended == true -> "Locked"
+                status.reasons.shouldLock -> "Lock pending"
+                status.suspended == true -> "Release pending"
+                status.suspended == null -> "Status unavailable"
+                else -> "Accessible"
+            }
+            views.add(section(status.appName, summary, label(status.explanation()), label(status.packageName, 12f)))
         }
         views.add(button("Back") { back() })
         screen(*views.toTypedArray())
@@ -143,10 +178,13 @@ class MainActivity : Activity() {
     }
 
     private fun readSharedSite(incoming: Intent) {
+        shareLinkTask?.cancel(true)
         receivedSiteShare = incoming.action == Intent.ACTION_SEND && incoming.type == "text/plain"
-        sharedDomain = if (receivedSiteShare) {
-            SharedSite.domainFromText(incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString())
-        } else null
+        sharedSiteText = if (receivedSiteShare) listOfNotNull(
+            incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString(),
+            incoming.getStringExtra(Intent.EXTRA_SUBJECT)
+        ).joinToString("\n") else null
+        sharedSiteOptions = SharedSite.whitelistOptions(sharedSiteText)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -168,6 +206,8 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         super.onStop()
+        shareLinkTask?.cancel(true)
+        shareLinkTask = null
         settingsAuthed = false
         if (!isChangingConfigurations) {
             authed = false
@@ -291,10 +331,8 @@ class MainActivity : Activity() {
         val locks = Policy.lockStatuses(this)
         fun waitText(ms: Long) = "Too many attempts. Try again in ${(ms + 59_999) / 60_000} min."
         screen(
-            label("Install Lock", 22f),
-            label(chromeLockExplanation(locks)),
-            button("Why apps are locked") { goTo { showLockReasons() } },
-            label("Enter your password."),
+            label("Install Lock", 26f),
+            label("Enter your main password to open the dashboard."),
             pw, msg,
             button("Unlock") {
                 val password = pw.text.toString()
@@ -313,18 +351,19 @@ class MainActivity : Activity() {
                     msg.text = if (w > 0) waitText(w) else "Wrong password."
                 }
             },
-            button("Chrome whitelist") { goTo { showChromeSites() } },
-            button("Extra locked sites") { goTo { showExtraLockedSites() } },
-            button("App locks") { goTo { showAppPicker() } },
-            button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
-            button("Google VPN filter") { goTo { showGoogleFilter() } },
-            button("Settings") { openSettings() },
-            status,
-            button("Lock protected apps now") {
-                Store.lockProtectedApps(this)
-                Policy.sweep(this)
-                reopen()
-            }
+            button("Why apps are locked") { goTo { showLockReasons() } },
+            browserActions(),
+            section("Apps", "Choose apps to lock or end an unlock session",
+                button("App locks") { goTo { showAppPicker() } },
+                button("Lock protected apps now") {
+                    Store.lockProtectedApps(this)
+                    Policy.sweep(this)
+                    reopen()
+                }),
+            section("Settings & passwords", "Separate password required for settings",
+                button("Settings") { openSettings() }),
+            section("Protection status", "Current app and browser protection",
+                status, label(chromeLockExplanation(locks)), label(curboxStatus()), label(playAccessSummary()))
         )
     }
 
@@ -351,17 +390,11 @@ class MainActivity : Activity() {
         val presets = HorizontalScrollView(this).apply { addView(presetRow) }
 
         screen(
-            label("Install Lock is active", 22f),
-            label(chromeLockExplanation(locks)),
-            button("Why apps are locked") { goTo { showLockReasons() } },
-            button("Extra locked sites") { goTo { showExtraLockedSites() } },
-            label("New apps are suspended for ${timings[TimingOption.INSTALL_WAIT]} minutes after install."),
-            label("Google Play Music & Audio, Finance and Shopping apps skip this wait after category verification. " +
-                    "The first check needs internet access; other protections still apply."),
+            label("Install Lock", 26f),
             label(unlockStatus()),
-            label("Chrome lock: " + (if (Store.chromeLock(this)) "ON (whitelist only)" else "off")),
+            button("Why apps are locked") { goTo { showLockReasons() } },
+            section("Unlock protected apps", "Choose a temporary unlock duration",
             label("Unlock for how many minutes? (max $maxUnlock)"),
-            label(curboxStatus()),
             minutes,
             presets,
             button("Unlock protected apps (app-lock password)") {
@@ -374,24 +407,23 @@ class MainActivity : Activity() {
                         Store.unlockProtectedApps(this, m, password)
                     }
                 }
-            },
+            }, initiallyExpanded = true),
+            section("Apps", "App locks, install rules and uninstall protection",
             button("Lock protected apps now") {
                 Store.lockProtectedApps(this)
                 Policy.sweep(this)
                 reopen()
             },
             button("App locks") { goTo { showAppPicker() } },
-            button("Browser & Google keyword filter") { goTo { showBrowserKeywords() } },
             button("Never-install list") { goTo { showNeverInstall() } },
-            button("Google VPN filter") { goTo { showGoogleFilter() } },
+            button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } }),
+            browserActions(),
+            section("Additional protections", "Screenshots and the Curbox guard",
+            label(curboxStatus()),
             button(if (shotsBlocked) "Allow screenshots (all apps)" else "Block screenshots (all apps)") {
                 toast(Policy.setScreenCaptureBlocked(this, !shotsBlocked))
                 reopen()
             },
-            button(if (hasFilterPw) "Change filter password" else "Set filter password") {
-                if (hasFilterPw) goTo { showChangeFilterPassword() } else goTo { showFilterPasswordSetup() }
-            },
-            button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } },
             button(if (Store.curboxGuard(this)) "Turn Curbox guard OFF (filter password)" else "Turn Curbox guard ON") {
                 if (Store.curboxGuard(this)) {
                     withFilterPassword("Turn Curbox guard off") {
@@ -407,9 +439,21 @@ class MainActivity : Activity() {
                     Policy.sweep(this)
                     reopen()
                 }
-            },
-            button("Change password") { goTo { showChangePassword() } },
-            button("Settings") { openSettings() }
+            }),
+            section("Settings & passwords", "Durations, Play Store access and separate passwords",
+                button("Settings") { openSettings() },
+                button("Change main password") { goTo { showChangePassword() } },
+                button(if (hasFilterPw) "Change filter password" else "Set filter password") {
+                    if (hasFilterPw) goTo { showChangeFilterPassword() } else goTo { showFilterPasswordSetup() }
+                },
+                button(if (Store.hasPassword(this, Store.Pw.APP_LOCK)) "Change app-lock password" else "Set app-lock password") {
+                    configureAppLockPassword()
+                }),
+            section("Protection status", "Current app and browser protection",
+                label(chromeLockExplanation(locks)),
+                label("Chrome whitelist: " + if (Store.chromeLock(this)) "ON" else "OFF"),
+                label("New-app waiting period: ${timings[TimingOption.INSTALL_WAIT]} minutes."),
+                label(playAccessSummary()))
         )
     }
 
@@ -640,7 +684,7 @@ class MainActivity : Activity() {
         screen(
             label("Google VPN filter", 22f),
             label("Routes only the Google app's DNS lookups through Install Lock and refuses " +
-                    "the servers that serve images and videos. Other apps aren't affected. " +
+                    "the servers that serve images and videos, plus domains blocked by your ordered domain rules. Other apps aren't affected. " +
                     "Google requires this VPN to be running, even during temporary app unlocks and when keyword filtering is off. " +
                     "Turning the VPN off keeps Google locked until you turn it on again."),
             status,
@@ -811,11 +855,48 @@ class MainActivity : Activity() {
     // ---------- Chrome whitelist ----------
 
     private fun showSharedSite() {
-        val openForm = { swapTo { showAddSite(sharedDomain.orEmpty()) } }
+        val openForm = { swapTo {
+            val shortLink = SharedSite.shortLinkFromText(sharedSiteText)
+            if (shortLink != null) showResolveSharedSite(shortLink)
+            else showAddSite(sharedSiteOptions.firstOrNull().orEmpty(), sharedSiteOptions)
+        } }
         if (!Store.hasPassword(this, Store.Pw.FILTER)) {
             showFilterPasswordSetup(onSaved = openForm)
         } else {
             showPasswordGate("Add to Chrome whitelist", Store.Pw.FILTER, openForm)
+        }
+    }
+
+    private fun showResolveSharedSite(shortLink: String) {
+        val status = label("Finding the original website behind Google's shortened link…")
+        val fallback = sharedSiteOptions.toList()
+        screen(
+            label("Add to Chrome whitelist", 22f), status, ProgressBar(this),
+            label("This checks the Google sharing link online. The destination page is not opened and nothing is added automatically."),
+            button(if (fallback.isEmpty()) "Enter the original address manually" else "Use the website shown in the shared text") {
+                shareLinkTask?.cancel(true)
+                swapTo { showAddSite(fallback.firstOrNull().orEmpty(), fallback,
+                    "Using the website shown in the shared text. Review or edit the address before adding it.") }
+            },
+            button("Cancel") { shareLinkTask?.cancel(true); back() }
+        )
+        shareLinkTask = shareLinkExecutor.submit {
+            val resolved = GoogleShareResolver().resolve(shortLink)
+            val resolvedOptions = resolved?.let { SharedSite.whitelistOptions(it) }.orEmpty()
+            runOnUiThread {
+                // Don't replace a newer share, an edited form, or a password screen after backgrounding.
+                if (!isFinishing && !isDestroyed && status.isAttachedToWindow && hasWindowFocus()) {
+                    val options = resolvedOptions.ifEmpty { fallback }
+                    val notice = when {
+                        resolvedOptions.isNotEmpty() -> "Resolved Google's short link to the original website. Review the address below."
+                        fallback.isNotEmpty() -> "Could not resolve the short link. Using the website shown in the shared text; review the address below."
+                        else -> "Could not resolve Google's short link. Enter the original website, or turn off “Shorten links to web pages” " +
+                                "in Google app → Settings → General and share again."
+                    }
+                    sharedSiteOptions = options
+                    swapTo { showAddSite(options.firstOrNull().orEmpty(), options, notice) }
+                }
+            }
         }
     }
 
@@ -889,21 +970,47 @@ class MainActivity : Activity() {
         show(col)
     }
 
-    private fun showAddSite(initialSite: String = "") {
+    private fun showAddSite(initialSite: String = "", suggestedSites: List<String> = emptyList(), shareNotice: String = "") {
         val siteWait = Store.timingConfig(this)[TimingOption.SITE_WAIT]
         val site = EditText(this)
         site.hint = "example.com or example.com/path"
         site.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         site.setText(initialSite)
         site.setSelection(site.text.length)
-        val msg = label(if (receivedSiteShare && initialSite.isEmpty())
-            "No valid website found in the shared text. Enter the domain below." else "")
-        screen(
+        val choices = if (suggestedSites.isNotEmpty()) RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            suggestedSites.forEach { pattern ->
+                addView(RadioButton(this@MainActivity).apply {
+                    id = View.generateViewId()
+                    text = pattern
+                    textSize = 16f
+                    minHeight = dp(48)
+                }, RadioGroup.LayoutParams(RadioGroup.LayoutParams.MATCH_PARENT, RadioGroup.LayoutParams.WRAP_CONTENT))
+            }
+            setOnCheckedChangeListener { group, checkedId ->
+                if (checkedId != -1) {
+                    site.setText(group.findViewById<RadioButton>(checkedId).text)
+                    site.setSelection(site.text.length)
+                }
+            }
+            check(getChildAt(suggestedSites.indexOf(initialSite).coerceAtLeast(0)).id)
+        } else null
+        val msg = label(shareNotice.ifEmpty { if (receivedSiteShare && initialSite.isEmpty())
+            "No valid website found in the shared text. Enter a domain or path below." else "" })
+        val views = mutableListOf<View>(
             label("Add a site", 22f),
             label("It becomes usable in Chrome $siteWait minutes after you add it. " +
-                    "A domain also allows its subdomains, and you can add a path to allow only part of a site."),
+                    "A domain also allows its subdomains. Path entries allow URLs that start with that path.")
+        )
+        if (choices != null) views.addAll(listOf(
+            label("Choose how much of this site to allow", 20f),
+            label("Listed from the shared path to the whole domain. Select an option, or edit the address below. " +
+                    "Query strings and page fragments are omitted."), choices
+        ))
+        views.addAll(listOf(
+            label(if (choices != null) "Selected address (editable)" else "Website address"),
             site, msg,
-            button("Add") {
+            button(if (choices != null) "Add selected address" else "Add") {
                 val s = Store.normalizeSite(site.text.toString())
                 when {
                     s == null -> msg.text = "That doesn't look like a specific site. Use something like example.com."
@@ -912,11 +1019,13 @@ class MainActivity : Activity() {
                         Policy.syncChrome(this)
                         msg.text = "Added $s. It will be active in $siteWait min."
                         site.setText("")
+                        choices?.clearCheck()
                     }
                 }
             },
             button("Done") { back() }
-        )
+        ))
+        screen(*views.toTypedArray())
     }
 
     // ---------- extra locked sites ----------
@@ -984,6 +1093,140 @@ class MainActivity : Activity() {
         screen(*views.toTypedArray())
     }
 
+    // ---------- ordered domain rules ----------
+
+    private fun withDomainRulePassword(title: String, operation: (String) -> Boolean) {
+        if (!Store.hasPassword(this, Store.Pw.FILTER)) {
+            toast("Set the filter password first, then retry this action.")
+            goTo { showFilterPasswordSetup() }
+            return
+        }
+        goTo {
+            showCredentialGate(title, Store.Pw.FILTER, operation) {
+                Policy.sweep(this)
+                back()
+            }
+        }
+    }
+
+    private fun showDomainRules() {
+        val rules = Store.domainRules(this)
+        fun choices(titles: List<String>) = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, titles).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+        }
+        fun positionField(value: Int) = EditText(this).apply {
+            hint = "Position (1 is highest)"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(value.toString())
+        }
+        val action = choices(DomainAction.entries.map { it.title })
+        val type = choices(DomainMatchType.entries.map { it.title })
+        val value = EditText(this).apply {
+            hint = "manga, .org, or example.org"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        val position = positionField(1)
+        val msg = label("").apply { setTextColor(Color.RED) }
+        val tester = EditText(this).apply {
+            hint = "Domain or URL to test, e.g. manga.org"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        val result = label("")
+        val views = mutableListOf<View>(
+            label("Ordered domain rules", 22f),
+            label("Rules run from top to bottom. The FIRST matching rule decides: Block or Allow. " +
+                    "If no rule matches, this filter allows the domain. Higher position means a smaller number."),
+            label("Example: #1 Block domains containing manga, #2 Allow suffix .org: manga.org is blocked. " +
+                    "Move Allow .org to #1 and manga.org passes this filter."),
+            section("Add a domain rule", "Block instantly; Allow requires the filter password",
+                label("Action"), action, label("Match type"), type, value,
+                label("Contains checks the hostname only. Suffix .org includes all .org domains; " +
+                        "example.org includes that domain and its subdomains. Exact matches only the named domain."),
+                label("Position (1 runs first; choose 1 to ${rules.size + 1})"), position, msg, button("Add rule") {
+                    val selectedAction = DomainAction.entries[action.selectedItemPosition]
+                    val selectedType = DomainMatchType.entries[type.selectedItemPosition]
+                    val normalized = DomainRules.normalizeValue(selectedType, value.text.toString())
+                    val target = position.text.toString().toIntOrNull()
+                    when {
+                        normalized == null -> msg.text = "Enter hostname text, a domain, or a suffix such as .org. Do not include a URL, path, or spaces."
+                        target == null || target !in 1..rules.size + 1 -> msg.text = "Enter a position from 1 to ${rules.size + 1}."
+                        rules.any { it.action == selectedAction && it.type == selectedType && it.value == normalized } -> msg.text = "This rule already exists. Change its position below."
+                        selectedAction == DomainAction.ALLOW -> withDomainRulePassword("Add Allow rule") { password ->
+                            Store.addDomainRule(this, selectedAction, selectedType, normalized, target, password)
+                        }
+                        else -> {
+                            if (Store.addDomainRule(this, selectedAction, selectedType, normalized, target)) {
+                                Policy.sweep(this)
+                                reopen()
+                            } else msg.text = "Rules changed. Refresh and try again."
+                        }
+                    }
+                }, initiallyExpanded = rules.isEmpty()),
+            label("Rule order (${rules.size})", 20f)
+        )
+        if (rules.isEmpty()) views.add(label("No domain rules yet."))
+        rules.forEachIndexed { index, rule ->
+            fun moveTo(target: Int) = withDomainRulePassword("Move rule to position $target") { password ->
+                Store.moveDomainRule(this, rule.id, target, password)
+            }
+            val controls = mutableListOf<View>(label(rule.description),
+                button("Change position (filter password)") {
+                    val field = positionField(index + 1)
+                    val dialog = AlertDialog.Builder(this).setTitle("Position for ${rule.value}")
+                        .setMessage("Choose 1 to ${rules.size}. Position 1 runs first.").setView(field)
+                        .setPositiveButton("Move", null).setNegativeButton("Cancel", null).create()
+                    dialog.setOnShowListener {
+                        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                            val target = field.text.toString().toIntOrNull()
+                            if (target == null || target !in 1..rules.size) field.error = "Enter 1 to ${rules.size}"
+                            else { dialog.dismiss(); if (target != index + 1) moveTo(target) }
+                        }
+                    }
+                    dialog.show()
+                })
+            if (index > 0) controls.add(button("Move up (filter password)") { moveTo(index) })
+            if (index < rules.lastIndex) controls.add(button("Move down (filter password)") { moveTo(index + 2) })
+            controls.add(button(if (rule.action == DomainAction.BLOCK) "Remove rule (filter password)" else "Remove Allow rule") {
+                if (rule.action == DomainAction.BLOCK) withDomainRulePassword("Remove Block rule") { password ->
+                    Store.removeDomainRule(this, rule.id, password)
+                } else {
+                    Store.removeDomainRule(this, rule.id)
+                    Policy.sweep(this)
+                    reopen()
+                }
+            })
+            views.add(section("#${index + 1} ${rule.action.title}: ${rule.value}", rule.type.title, *controls.toTypedArray()))
+        }
+        views.add(section("Test a domain", "Shows the first matching rule without opening a website", tester,
+            button("Test rules") {
+                val host = DomainRules.hostFromAddress(tester.text.toString())
+                val match = host?.let { DomainRules(Store.domainRules(this)).match(it) }
+                result.text = when {
+                    host == null -> "Enter a valid domain or http(s) URL."
+                    match == null -> "$host: no matching rule; passes this filter. Other protections still apply."
+                    else -> "$host: ${match.rule.action.title.uppercase()} by rule #${match.position}: ${match.rule.description}"
+                }
+            }, result))
+        views.add(section("Protection & scope", "Accessibility for browsers; VPN for Google",
+            label("Browser domain checks use the visible native address bar. The accessibility service must be running. " +
+                    "Google app domain checks use the built-in VPN's DNS filter. Cached connections may continue until the next DNS lookup. " +
+                    "Browser address-bar support depends on the browser."),
+            label("Allow passes only this domain filter. Chrome whitelist, extra site locks, Google DNS blocklist, " +
+                    "keyword filtering and app locks still apply. Paths and search terms are not domain names."),
+            label("Adding Block rules is immediate. Adding Allow rules, removing Block rules, and reordering require the filter password. " +
+                    "While any rules exist, disabling accessibility locks browsers and Google."),
+            label("Accessibility service: " + if (BrowserKeywordService.isReady(this)) "running" else "not running"),
+            button("Android accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+            button("Google VPN filter") { goTo { showGoogleFilter() } }))
+        views.add(button("Refresh") { reopen() })
+        views.add(button("Back") { back() })
+        screen(*views.toTypedArray())
+    }
+
     // ---------- browser keyword filter ----------
 
     private fun showBrowserKeywords() {
@@ -1039,18 +1282,12 @@ class MainActivity : Activity() {
                 reopen()
             }
         }
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-        }
-        col.addView(label("Browser & Google keyword filter", 22f))
-        col.addView(label(when {
+        val filterStatus = label(when {
             !filterOn -> "Keyword filter: OFF (disabled with filter password)."
             !ready -> "Keyword filter: ON. Browsers and the Google app are blocked until the accessibility service is running."
             else -> "Keyword filter: ON. Accessibility service is running."
-        }))
-        col.addView(label("Accessibility service: " + if (enabled) "enabled" else "OFF — enable it below"))
-        col.addView(button(if (filterOn) "Turn keyword filter OFF (filter password)" else "Turn keyword filter ON") {
+        })
+        val toggle = button(if (filterOn) "Turn keyword filter OFF (filter password)" else "Turn keyword filter ON") {
             if (Store.browserKeywordFilterEnabled(this)) {
                 if (!Store.hasPassword(this, Store.Pw.FILTER)) {
                     toast("Set the filter password first, then retry turning the filter off.")
@@ -1067,43 +1304,42 @@ class MainActivity : Activity() {
                 Policy.sweep(this)
                 reopen()
             }
-        })
-        col.addView(label("Checks visible browser webpages and Google app content, including search results and Discover, " +
-                "for whole words or phrases regardless of case. Both use the same blocked-word list. " +
-                "Typed fields are ignored. A match in Google opens a blocked-results screen where you can edit your search " +
-                "or retry with the triggering word excluded. " +
-                "In browsers, it tries the current-tab close action; " +
-                "otherwise returns Home. Detection depends on readable accessibility content. " +
-                "Inspected text stays on this device and is not saved."))
-        col.addView(button("Start a new Google search") {
-            startActivity(GoogleSearchRecoveryActivity.openIntent(this))
-        })
-        col.addView(button("Google VPN filter") { goTo { showGoogleFilter() } })
-        col.addView(button("Open Android accessibility settings") {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        })
-        col.addView(label("Enable “${getString(R.string.browser_keyword_service_name)}”. If Android turns the service off, " +
-                "browsers and the Google app are blocked even during a temporary app unlock. Re-enable the service, or use the filter password " +
-                "above to turn keyword protection off. Google also requires Install Lock's built-in VPN. " +
-                "Other app locks and Chrome whitelist rules still apply. " +
-                "Select a word from the dropdown, then Manage selected word to request removal ($wait-minute wait) " +
-                "or cancel a pending removal. Per-word exceptions can allow one blocked word; " +
-                "generic page exceptions allow all keyword matches on that visible page."))
-        col.addView(field)
-        col.addView(msg)
-        col.addView(add)
-        col.addView(label("Blocked words (${entries.size})", 20f))
-        if (entries.isEmpty()) col.addView(label("No blocked words."))
-        col.addView(list)
-        col.addView(manageWord)
-        col.addView(button("Page exceptions") {
-            val selected = entries.getOrNull(list.selectedItemPosition)?.word
-            goTo { showKeywordExceptions(selected) }
-        })
-        col.addView(button("Generic page exceptions") { goTo { showGenericKeywordExceptions() } })
-        col.addView(button("Refresh") { reopen() })
-        col.addView(button("Back") { back() })
-        show(ScrollView(this).apply { isFillViewport = true; addView(col) })
+        }
+        screen(
+            label("Browser & Google keyword filter", 22f), filterStatus,
+            section("Blocked words", "${entries.size} words and phrases; removals take $wait minutes",
+                label(if (entries.isEmpty()) "No blocked words." else "Select a word to manage its removal."),
+                list, manageWord, field, msg, add, initiallyExpanded = true),
+            section("Page exceptions", "Allow specific topics or the whole page",
+                button("Per-word page exceptions") {
+                    val selected = entries.getOrNull(list.selectedItemPosition)?.word
+                    goTo { showKeywordExceptions(selected) }
+                },
+                button("Generic page exceptions") { goTo { showGenericKeywordExceptions() } }),
+            section("Filter controls & recovery", "Accessibility, Google VPN and a new search",
+                label(if (Store.domainRules(this).isEmpty()) "No ordered domain rules configured."
+                    else "Ordered domain rules remain active even when keyword filtering is off."),
+                button("Ordered domain rules") { goTo { showDomainRules() } },
+                label("Accessibility service: " + if (enabled) "enabled" else "OFF"), toggle,
+                button("Open Android accessibility settings") {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                },
+                button("Google VPN filter") { goTo { showGoogleFilter() } },
+                button("Start a new Google search") { startActivity(GoogleSearchRecoveryActivity.openIntent(this)) }),
+            section("How keyword filtering works", "Matching rules, exceptions and privacy",
+                label("Checks visible browser pages and Google app content, including results and Discover. " +
+                        "Matches whole words or phrases regardless of case, and ignores typed fields. " +
+                        "Google opens a blocked-results screen so you can edit or exclude the triggering word. " +
+                        "Browsers try to close the tab, otherwise return Home. " +
+                        "Detection depends on readable accessibility content. Inspected text stays on this device and is not saved."),
+                label("Enable “${getString(R.string.browser_keyword_service_name)}” in Android accessibility settings. " +
+                        "When keyword protection is on, browsers and Google remain locked if the service is off. " +
+                        "Turning protection off requires the filter password. Google also requires the built-in VPN."),
+                label("Select a blocked word and tap Manage selected word to request or cancel removal. " +
+                        "Per-word exceptions allow one blocked word. Generic exceptions allow all keyword matches on that page. " +
+                        "Other app and site restrictions still apply.")),
+            button("Refresh") { reopen() }, button("Back") { back() }
+        )
         val nextRemoval = entries.mapNotNull { it.removeAt }.minOrNull()
         if (nextRemoval != null) list.postDelayed({
             if (list.isAttachedToWindow && hasWindowFocus() && field.text.isBlank() && !field.hasFocus()) reopen()
@@ -1312,26 +1548,60 @@ class MainActivity : Activity() {
             inputType = InputType.TYPE_CLASS_TEXT
             setText(config.unlockPresets.joinToString(", "))
         }
+        val savedCategories = Store.immediatePlayCategories(this)
+        val categoryBoxes = PlayInstallCategory.entries.associateWith { category ->
+            CheckBox(this).apply {
+                text = category.title
+                textSize = 16f
+                minHeight = dp(48)
+                isChecked = category.storeId in savedCategories
+            }
+        }
+        val categorySummary = label("")
+        fun updateCategorySummary() {
+            categorySummary.text = "${categoryBoxes.values.count { it.isChecked }} of ${categoryBoxes.size} categories selected. " +
+                    "Changes apply when you tap Save settings."
+        }
+        categoryBoxes.values.forEach { it.setOnCheckedChangeListener { _, _ -> updateCategorySummary() } }
+        updateCategorySummary()
+        fun timingViews(vararg options: TimingOption): Array<View> = options.flatMap { option ->
+            listOf(label("${option.title} (${option.unit}, ${option.minimum}-${option.maximum})"), fields.getValue(option))
+        }.toTypedArray()
         val msg = label("")
         val views = mutableListOf<View>(
             label("Settings", 22f),
-            label("Changes take effect when saved. Install and whitelist waits are recalculated " +
-                    "from the original install/add times, including existing entries. " +
-                    "An active unlock is capped to the new maximum; existing password lockouts keep their end times. " +
-                    "Keyword removal requests keep their scheduled deadlines; their delay setting applies to new requests.")
+            label("Protected by your settings password. Expand a section, make changes, then Save settings."),
+            section("Play Store immediate access", "Choose categories that skip the new-app wait",
+                categorySummary,
+                label("Only apps installed from Google Play qualify. The category must be verified online first. " +
+                        "Unselected or unverified apps keep the normal wait. Other locks and filters still apply."),
+                section("App categories", "Music, finance, shopping and other app types",
+                    *categoryBoxes.filterKeys { !it.isGame }.values.toTypedArray()),
+                section("Game categories", "Individual game genres",
+                    *categoryBoxes.filterKeys { it.isGame }.values.toTypedArray()),
+                button("Clear category selection") { categoryBoxes.values.forEach { it.isChecked = false } },
+                button("Use default categories") {
+                    categoryBoxes.forEach { (category, box) -> box.isChecked = category.storeId in PlayCategoryRules.defaultCategories }
+                }),
+            section("Install waiting period", "Default delay for newly installed apps",
+                *timingViews(TimingOption.INSTALL_WAIT)),
+            section("Websites & keywords", "Whitelist activation and blocked-word removal waits",
+                *timingViews(TimingOption.SITE_WAIT, TimingOption.KEYWORD_REMOVAL_WAIT),
+                label("Extra locked sites always use a fixed 45-minute removal wait.")),
+            section("Unlock durations", "Temporary unlock limits and shortcut buttons",
+                *timingViews(TimingOption.DEFAULT_UNLOCK, TimingOption.MAX_UNLOCK),
+                label("Unlock button presets (1-6 different durations in minutes, separated by commas)"), presets),
+            section("Protection timing", "Curbox, background checks and network timeouts",
+                *timingViews(TimingOption.CURBOX_GRACE, TimingOption.POLICY_INTERVAL, TimingOption.UNINSTALL_RETRY,
+                    TimingOption.DNS_TIMEOUT, TimingOption.CHROME_RESTART)),
+            section("Password security", "Failed attempts and lockout durations",
+                *timingViews(TimingOption.PASSWORD_FAILURES, TimingOption.LOCKOUT_INITIAL, TimingOption.LOCKOUT_MAX)),
+            section("When changes take effect", "How saved settings affect existing timers",
+                label("Install and whitelist waits are recalculated from the original install/add times. " +
+                        "Play category changes apply to installed apps still within their install wait. " +
+                        "An active unlock is capped to the new maximum. Existing password lockouts keep their end times. " +
+                        "Keyword removal requests keep their scheduled deadlines; their delay setting applies to new requests."))
         )
-        for ((option, field) in fields) {
-            when (option) {
-                TimingOption.INSTALL_WAIT -> views.add(label("Apps and websites", 20f))
-                TimingOption.CURBOX_GRACE -> views.add(label("Other timing", 20f))
-                TimingOption.PASSWORD_FAILURES -> views.add(label("Password attempts and lockouts", 20f))
-                else -> Unit
-            }
-            views.add(label("${option.title} (${option.unit}, ${option.minimum}-${option.maximum})"))
-            views.add(field)
-        }
-        views.add(label("Unlock button presets (1-6 different durations in minutes, separated by commas)"))
-        views.add(presets)
         views.add(msg)
         views.add(button("Save settings") {
             if (settingsAuthed) {
@@ -1343,18 +1613,25 @@ class MainActivity : Activity() {
                 if (invalid != null) {
                     val option = invalid.key
                     fields.getValue(option).error = "Enter ${option.minimum} to ${option.maximum} ${option.unit}."
-                    fields.getValue(option).requestFocus()
+                    reveal(fields.getValue(option))
                     msg.text = "Check ${option.title.lowercase()}."
                 } else if (presetValues.any { it == null }) {
                     presets.error = "Enter whole minutes separated by commas."
+                    reveal(presets)
                     msg.text = "Check the unlock presets."
                 } else {
                     val updated = TimingConfig(values.mapValues { it.value!! }, presetValues.filterNotNull())
                     val error = updated.validationError()
                     if (error != null) {
                         msg.text = error
+                        reveal(when {
+                            updated[TimingOption.DEFAULT_UNLOCK] > updated[TimingOption.MAX_UNLOCK] -> fields.getValue(TimingOption.DEFAULT_UNLOCK)
+                            updated[TimingOption.LOCKOUT_INITIAL] > updated[TimingOption.LOCKOUT_MAX] -> fields.getValue(TimingOption.LOCKOUT_INITIAL)
+                            else -> presets
+                        })
                     } else {
                         Store.saveTimingConfig(this, updated)
+                        Store.saveImmediatePlayCategories(this, categoryBoxes.filterValues { it.isChecked }.keys.map { it.storeId }.toSet())
                         Policy.sweep(this)
                         LockService.start(this)
                         msg.text = "Settings saved."
@@ -1367,6 +1644,7 @@ class MainActivity : Activity() {
                 val defaults = TimingConfig()
                 fields.forEach { (option, field) -> field.setText(defaults[option].toString()); field.error = null }
                 presets.setText(defaults.unlockPresets.joinToString(", "))
+                categoryBoxes.forEach { (category, box) -> box.isChecked = category.storeId in PlayCategoryRules.defaultCategories }
                 msg.text = "Defaults filled in. Tap Save settings to apply them."
             }
         })
@@ -1406,6 +1684,21 @@ class MainActivity : Activity() {
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
+    private fun section(title: String, summary: String, vararg children: View,
+                        initiallyExpanded: Boolean = false): ExpandableSection =
+        ExpandableSection(this, title, summary, sectionStates[title] ?: initiallyExpanded,
+            { sectionStates[title] = it }, *children)
+
+    private fun reveal(view: View) {
+        var ancestor = view.parent
+        while (ancestor is View) {
+            if (ancestor is ExpandableSection) ancestor.expand()
+            ancestor = ancestor.parent
+        }
+        view.requestFocus()
+        view.post { view.requestRectangleOnScreen(android.graphics.Rect(0, 0, view.width, view.height), false) }
+    }
+
     /** Shows [content] padded so it stays clear of the status bar, navigation bar,
      *  camera cutout and keyboard. */
     private fun show(content: View) {
@@ -1433,8 +1726,10 @@ class MainActivity : Activity() {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(24), dp(16), dp(24), dp(24))
-        views.forEach { col.addView(it) }
+        views.forEach { col.addView(it, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) }) }
         val scroll = ScrollView(this)
+        scroll.isFillViewport = true
         scroll.addView(col)
         show(scroll)
     }
@@ -1457,6 +1752,8 @@ class MainActivity : Activity() {
     private fun button(t: String, onClick: () -> Unit): Button {
         val b = Button(this)
         b.text = t
+        b.isAllCaps = false
+        b.minHeight = dp(48)
         b.setOnClickListener { onClick() }
         return b
     }

@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AppLockStatusTest {
+    @Test fun domainRulesKeepAccessibilityRequiredWhenKeywordFilteringIsOff() {
+        val reasons = AppLockReasons(domainServiceMissing = true)
+        assertTrue(reasons.shouldLock)
+        assertEquals(1, reasons.descriptions().size)
+        assertTrue(reasons.descriptions().single().contains("Ordered domain rules"))
+        assertTrue(reasons.descriptions().single().contains("Android Accessibility settings"))
+        assertTrue(reasons.copy(accessibilityEnabled = true).descriptions().single().contains("has not connected"))
+        assertFalse(reasons.copy(domainServiceMissing = false).shouldLock)
+    }
+
     private fun status(reasons: AppLockReasons, suspended: Boolean?) =
         AppLockStatus("com.android.chrome", "Chrome", reasons, suspended)
 

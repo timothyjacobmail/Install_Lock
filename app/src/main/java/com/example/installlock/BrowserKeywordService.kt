@@ -29,11 +29,17 @@ class BrowserKeywordService : AccessibilityService() {
     private var pageFilter = KeywordPageFilter(emptySet())
     private val prefs by lazy { getSharedPreferences("install_lock", Context.MODE_PRIVATE) }
 
+    private fun filteringRequired() = Store.browserKeywordFilterEnabled(this) || Store.domainRules(this).isNotEmpty()
+
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "browserKeywords" || key == "keywordRemovalRequests" ||
             key == "keywordExceptions" || key == "genericKeywordExceptions") scheduleScan(0)
         if (key == "keywordFilterEnabled") {
-            if (Store.browserKeywordFilterEnabled(this)) scheduleScan(0) else onInterrupt()
+            if (filteringRequired()) scheduleScan(0) else onInterrupt()
+        }
+        if (key == "domainRules") {
+            if (filteringRequired()) scheduleScan(0) else onInterrupt()
+            Policy.sweep(this)
         }
     }
     private val packageReceiver = object : BroadcastReceiver() {
@@ -73,7 +79,7 @@ class BrowserKeywordService : AccessibilityService() {
     }
 
     private fun scheduleScan(delay: Long) {
-        if (scanScheduled || handlingMatch || !Store.browserKeywordFilterEnabled(this)) return
+        if (scanScheduled || handlingMatch || !filteringRequired()) return
         scanScheduled = true
         handler.postDelayed(scan, delay)
     }
@@ -84,12 +90,21 @@ class BrowserKeywordService : AccessibilityService() {
     }
 
     private fun scanPage() {
-        if (!Store.browserKeywordFilterEnabled(this)) return
+        if (!filteringRequired()) return
         val root = rootInActiveWindow ?: return
         try {
             val browser = root.packageName?.toString() ?: return
             if (browser !in targets) return
-            val words = Store.browserKeywords(this)
+            val domainRules = Store.domainRules(this)
+            if (browser != BrowserPackages.GOOGLE_APP && domainRules.isNotEmpty()) {
+                val host = browserHost(root, browser)
+                val decision = host?.let { DomainRules(domainRules).match(it) }
+                if (decision?.rule?.action == DomainAction.BLOCK) {
+                    closeTabOrLeave(root, browser, "$host (domain rule #${decision.position})")
+                    return
+                }
+            }
+            val words = if (Store.browserKeywordFilterEnabled(this)) Store.browserKeywords(this) else emptySet()
             val exceptions = Store.keywordExceptions(this)
             val genericExceptions = Store.genericKeywordExceptions(this)
             if (words != lastWords || exceptions != lastExceptions || genericExceptions != lastGenericExceptions) {
@@ -114,6 +129,27 @@ class BrowserKeywordService : AccessibilityService() {
             // A browser may replace its accessibility tree during navigation.
             scheduleScan(500)
         } finally { root.recycle() }
+    }
+
+    private fun browserHost(root: AccessibilityNodeInfo, browser: String): String? {
+        var visited = 0
+        fun walk(node: AccessibilityNodeInfo, depth: Int): String? {
+            if (depth > 64 || ++visited > 2000 || node.isPassword) return null
+            val type = node.className?.toString().orEmpty()
+            // Website content and search-result links cannot impersonate the address bar.
+            if (type == "android.webkit.WebView" || type.endsWith("GeckoView")) return null
+            if (node.isVisibleToUser && !node.isFocused &&
+                node.packageName?.toString() == browser && BrowserAddress.isAddressField(browser, node.viewIdResourceName)) {
+                DomainRules.hostFromAddress(node.text?.toString().orEmpty())?.let { return it }
+            }
+            for (index in 0 until node.childCount) {
+                if (visited >= 2000) break
+                val child = node.getChild(index) ?: continue
+                try { walk(child, depth + 1)?.let { return it } } finally { child.recycle() }
+            }
+            return null
+        }
+        return walk(root, 0)
     }
 
     private fun visiblePageText(root: AccessibilityNodeInfo, queryText: GoogleResultText?): String {
@@ -263,7 +299,7 @@ class BrowserKeywordService : AccessibilityService() {
             if (root?.packageName?.toString() == browser) {
                 performGlobalAction(GLOBAL_ACTION_HOME)
                 val app = if (browser == BrowserPackages.GOOGLE_APP) "Google app" else "Browser"
-                Toast.makeText(this, "$app keyword blocked: $word", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "$app blocked: $word", Toast.LENGTH_SHORT).show()
             }
         } finally {
             root?.recycle()

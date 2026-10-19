@@ -8,6 +8,55 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 object Store {
+    internal fun domainRules(c: Context): List<DomainRule> = p(c).getString("domainRules", "").orEmpty()
+        .lineSequence().mapNotNull { DomainRule.decode(it) }.distinctBy { it.id }.toList()
+
+    private fun saveDomainRules(c: Context, rules: List<DomainRule>) {
+        p(c).edit().putString("domainRules", rules.joinToString("\n") { it.encode() }).apply()
+    }
+
+    @Synchronized
+    internal fun addDomainRule(c: Context, action: DomainAction, type: DomainMatchType, input: String,
+                               position: Int, password: String? = null): Boolean {
+        val value = DomainRules.normalizeValue(type, input) ?: return false
+        val rules = domainRules(c).toMutableList()
+        if (position !in 1..rules.size + 1 || rules.any { it.action == action && it.type == type && it.value == value }) return false
+        if (action == DomainAction.ALLOW && (password == null || !hasPassword(c, Pw.FILTER) ||
+                    !checkPassword(c, password, Pw.FILTER))) return false
+        rules.add(position - 1, DomainRule(java.util.UUID.randomUUID().toString(), action, type, value))
+        saveDomainRules(c, rules)
+        return true
+    }
+
+    @Synchronized
+    internal fun moveDomainRule(c: Context, id: String, position: Int, password: String): Boolean {
+        val rules = domainRules(c).toMutableList()
+        val index = rules.indexOfFirst { it.id == id }
+        if (index < 0 || position !in 1..rules.size) return false
+        if (!hasPassword(c, Pw.FILTER) || !checkPassword(c, password, Pw.FILTER)) return false
+        rules.add(position - 1, rules.removeAt(index))
+        saveDomainRules(c, rules)
+        return true
+    }
+
+    @Synchronized
+    internal fun removeDomainRule(c: Context, id: String, password: String? = null): Boolean {
+        val rules = domainRules(c)
+        val rule = rules.firstOrNull { it.id == id } ?: return false
+        if (rule.action == DomainAction.BLOCK && (password == null || !hasPassword(c, Pw.FILTER) ||
+                    !checkPassword(c, password, Pw.FILTER))) return false
+        saveDomainRules(c, rules.filterNot { it.id == id })
+        return true
+    }
+
+    fun immediatePlayCategories(c: Context): Set<String> = PlayCategoryRules.validCategories(
+        p(c).getStringSet("immediatePlayCategories", PlayCategoryRules.defaultCategories)!!.toSet())
+
+    /** Saved only from the settings-password-protected editor, like timing settings. */
+    fun saveImmediatePlayCategories(c: Context, categories: Set<String>) {
+        p(c).edit().putStringSet("immediatePlayCategories", PlayCategoryRules.validCategories(categories)).apply()
+    }
+
     fun timingConfig(c: Context): TimingConfig {
         val prefs = p(c)
         val values = TimingOption.entries.associateWith { prefs.getInt("timing_${it.name}", it.default) }
@@ -207,21 +256,8 @@ object Store {
         return sites(c).filter { now >= it.activeAt }.map { it.pattern }
     }
 
-    private val SITE_RE = Regex(
-        "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\\d+)?(/[^\\s|*]*)?$"
-    )
-    private val SUFFIX_LIKE = setOf("co", "com", "org", "net", "gov", "edu", "ac", "or", "ne", "go")
-
     /** "https://www.Example.com/" -> "example.com". Null if it isn't a specific, safe site. */
-    fun normalizeSite(input: String): String? {
-        val s = input.trim().lowercase()
-            .removePrefix("https://").removePrefix("http://").removePrefix("www.")
-            .trimEnd('/')
-        if (!SITE_RE.matches(s)) return null
-        val labels = s.substringBefore('/').substringBefore(':').split('.')
-        if (labels.size == 2 && labels[0] in SUFFIX_LIKE && labels[1].length == 2) return null // e.g. co.uk
-        return s
-    }
+    fun normalizeSite(input: String): String? = SitePattern.normalize(input)
 
     fun chromeLock(c: Context) = p(c).getBoolean("chromeLock", false)
 

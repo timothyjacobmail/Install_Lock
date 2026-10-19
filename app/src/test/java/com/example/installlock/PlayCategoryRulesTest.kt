@@ -4,14 +4,45 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PlayCategoryRulesTest {
-    @Test fun onlyTheThreeRequestedPlayCategoriesAreExempt() {
+    @Test fun onlyTheOriginalThreeCategoriesAreEnabledByDefault() {
         for (category in PlayInstallCategory.entries) {
-            assertEquals(category, PlayCategoryRules.exemption("com.android.vending", category.storeId))
+            assertEquals(if (category.storeId in PlayCategoryRules.defaultCategories) category else null,
+                PlayCategoryRules.exemption("com.android.vending", category.storeId))
         }
         for (category in listOf("ENTERTAINMENT", "VIDEO_PLAYERS", "GAME_MUSIC", "PRODUCTIVITY", "", "Shopping")) {
             assertNull(PlayCategoryRules.exemption("com.android.vending", category))
         }
         assertNull(PlayCategoryRules.exemption("com.android.vending", null))
+    }
+
+    @Test fun selectedAppAndGameCategoriesAreEligible() {
+        val selected = setOf("EDUCATION", "TOOLS", "GAME_PUZZLE")
+        for (category in PlayInstallCategory.entries) {
+            assertEquals(if (category.storeId in selected) category else null,
+                PlayCategoryRules.exemption("com.android.vending", category.storeId, selected))
+        }
+    }
+
+    @Test fun changingSelectionImmediatelyChangesEligibilityForACachedCategory() {
+        val record = PlayCategoryRecord(1_000, 2_000, "FINANCE", Long.MAX_VALUE)
+        assertEquals(PlayInstallCategory.FINANCE, PlayCategoryRules.exemption("com.android.vending", record.category, setOf("FINANCE")))
+        assertNull(PlayCategoryRules.exemption("com.android.vending", record.category, emptySet()))
+        assertNull(PlayCategoryRules.exemption("com.android.vending", record.category, setOf("SHOPPING")))
+    }
+
+    @Test fun unknownCategoriesAndUntrustedInstallersStayIneligibleEvenWhenSelected() {
+        assertNull(PlayCategoryRules.exemption("com.android.vending", "FAKE_CATEGORY", setOf("FAKE_CATEGORY")))
+        assertNull(PlayCategoryRules.exemption("com.android.shell", "TOOLS", setOf("TOOLS")))
+        assertEquals(setOf("TOOLS", "GAME_PUZZLE"), PlayCategoryRules.validCategories(setOf("TOOLS", "GAME_PUZZLE", "FAKE_CATEGORY")))
+    }
+
+    @Test fun catalogDistinguishesMusicAndSportsAppsFromGames() {
+        assertFalse(PlayInstallCategory.MUSIC_AND_AUDIO.isGame)
+        assertTrue(PlayInstallCategory.GAME_MUSIC.isGame)
+        assertEquals("Games: Sports", PlayInstallCategory.GAME_SPORTS.displayName)
+        assertEquals("Sports", PlayInstallCategory.SPORTS.displayName)
+        val ids = PlayInstallCategory.entries.map { it.storeId }
+        assertEquals(ids.size, ids.toSet().size)
     }
 
     @Test fun sideloadedAndOtherStoreAppsDoNotGetCategoryExemptions() {
