@@ -28,6 +28,13 @@ class BrowserKeywordService : AccessibilityService() {
     private var lastGenericExceptions = emptySet<String>()
     private var pageFilter = KeywordPageFilter(emptySet())
     private val prefs by lazy { getSharedPreferences("install_lock", Context.MODE_PRIVATE) }
+    private val watchdogWarnings by lazy { WatchdogWarningBanner(this) }
+    private val categoryWatchdog by lazy {
+        WebsiteWatchdogMonitor(this, handler, { targets }, watchdogWarnings) { root, browser -> browserHost(root, browser, visibleOnly = false) }
+    }
+    private val rapidScrollWatchdog by lazy {
+        RapidScrollMonitor(this, handler, { targets }, watchdogWarnings) { root, browser -> browserAddress(root, browser, visibleOnly = false) }
+    }
 
     private fun filteringRequired() = Store.browserKeywordFilterEnabled(this) || Store.domainRules(this).isNotEmpty()
 
@@ -63,6 +70,8 @@ class BrowserKeywordService : AccessibilityService() {
             registered = true
         }
         connected = true
+        categoryWatchdog.start()
+        rapidScrollWatchdog.start()
         Policy.sweep(this)
         scheduleScan(0)
     }
@@ -70,11 +79,14 @@ class BrowserKeywordService : AccessibilityService() {
     private fun refreshTargets() {
         // Some Android versions hide suspended handlers from intent queries. Keep their targets
         // registered before the guard releases them as this service reconnects.
-        targets = BrowserPackages.keywordTargets(this) + Store.keywordGuardPackages(this)
-        serviceInfo = serviceInfo.apply { packageNames = targets.toTypedArray() }
+        targets = BrowserPackages.keywordTargets(this) + (Store.keywordGuardPackages(this) - ShortFormFeeds.nativePackages)
+        serviceInfo = serviceInfo.apply { packageNames = (targets + ShortFormFeeds.nativePackages).toTypedArray() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event != null) try { rapidScrollWatchdog.onScroll(event) } catch (_: RuntimeException) {
+            // Navigation can invalidate a scroll event's source while it is being inspected.
+        }
         if (event?.packageName?.toString() in targets) scheduleScan(0)
     }
 
@@ -131,16 +143,22 @@ class BrowserKeywordService : AccessibilityService() {
         } finally { root.recycle() }
     }
 
-    private fun browserHost(root: AccessibilityNodeInfo, browser: String): String? {
+    private fun browserHost(root: AccessibilityNodeInfo, browser: String, visibleOnly: Boolean = true): String? =
+        browserAddress(root, browser, visibleOnly)?.let { DomainRules.hostFromAddress(it) }
+
+    private fun browserAddress(root: AccessibilityNodeInfo, browser: String, visibleOnly: Boolean = true): String? {
         var visited = 0
         fun walk(node: AccessibilityNodeInfo, depth: Int): String? {
             if (depth > 64 || ++visited > 2000 || node.isPassword) return null
             val type = node.className?.toString().orEmpty()
             // Website content and search-result links cannot impersonate the address bar.
             if (type == "android.webkit.WebView" || type.endsWith("GeckoView")) return null
-            if (node.isVisibleToUser && !node.isFocused &&
+            // A browser can slide its genuine address control offscreen while its document stays
+            // visible. The watchdog can read that native control without trusting page text.
+            if ((!visibleOnly || node.isVisibleToUser) && !node.isFocused &&
                 node.packageName?.toString() == browser && BrowserAddress.isAddressField(browser, node.viewIdResourceName)) {
-                DomainRules.hostFromAddress(node.text?.toString().orEmpty())?.let { return it }
+                val address = node.text?.toString().orEmpty()
+                if (DomainRules.hostFromAddress(address) != null) return address
             }
             for (index in 0 until node.childCount) {
                 if (visited >= 2000) break
@@ -309,9 +327,15 @@ class BrowserKeywordService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        categoryWatchdog.stop()
+        rapidScrollWatchdog.stop()
         handler.removeCallbacksAndMessages(null)
         scanScheduled = false
         handlingMatch = false
+        if (connected && isEnabled(this)) {
+            categoryWatchdog.start()
+            rapidScrollWatchdog.start()
+        }
     }
 
     override fun onDestroy() {

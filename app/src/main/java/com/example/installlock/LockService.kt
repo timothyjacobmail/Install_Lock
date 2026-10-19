@@ -40,7 +40,9 @@ class LockService : Service() {
 
     private fun scheduleBoundary(): Long {
         val now = System.currentTimeMillis()
-        val next = CurfewRules.nextBoundary(now, CurfewStore.zone(), CurfewStore.appealedNight(this))
+        val cooldown = WatchdogStore.remaining(this)
+        val next = minOf(CurfewRules.nextBoundary(now, CurfewStore.zone(), CurfewStore.appealedNight(this)),
+            if (cooldown > 0) now + cooldown else Long.MAX_VALUE)
         if (scheduledBoundary != next) {
             val alarms = getSystemService(AlarmManager::class.java)
             alarms.cancel(boundaryAlarm)

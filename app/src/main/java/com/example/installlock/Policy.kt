@@ -72,6 +72,11 @@ object Policy {
         val admin = admin(c)
         val pm = c.packageManager
         val now = System.currentTimeMillis()
+        val cooldownRemaining = WatchdogStore.remaining(c)
+        val cooldownTargets = WatchdogStore.cooldownPackages(c)
+        val rapidCooldown = WatchdogStore.rapidCooldown(c)
+        try { WatchdogStore.enforceInstallLock(c, cooldownRemaining > 0) }
+        catch (e: Exception) { Log.w("InstallLock", "Could not reconcile cooldown install restriction; will retry", e) }
         val timings = Store.timingConfig(c)
         val homePkg = pm.resolveActivity(
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0
@@ -86,8 +91,8 @@ object Policy {
         val accessibilityEnabled = BrowserKeywordService.isEnabled(c)
         val keywordFilterOn = Store.browserKeywordFilterEnabled(c)
         val domainRulesOn = Store.domainRules(c).isNotEmpty()
-        val keywordBrowsers = if ((keywordFilterOn || domainRulesOn) && !BrowserKeywordService.isReady(c))
-            BrowserPackages.keywordTargets(c) + previousKeywordGuard else emptySet()
+        val keywordBrowsers = if (!BrowserKeywordService.isReady(c))
+            WatchdogStore.monitoredPackages(c) + previousKeywordGuard else emptySet()
         val keywordReleaseRetries = mutableSetOf<String>()
         val googleVpnMissing = !DnsFilterService.isReady(c)
         val neverRules = Store.neverInstall(c)
@@ -131,7 +136,8 @@ object Policy {
             val isGoogle = name == BrowserPackages.GOOGLE_APP
             // Previously guarded system apps must also be processed so they can be resumed.
             if (isSystem && !isProtected && !isBrowser && !isGuarded &&
-                !keywordPaused && !isGoogle && name !in previousKeywordGuard && name !in releaseTargets && name !in curfewTargets) {
+                !keywordPaused && !isGoogle && name !in previousKeywordGuard && name !in releaseTargets && name !in curfewTargets &&
+                name !in cooldownTargets) {
                 // Read status without changing policy for unrelated system apps.
                 if (name == CHROME) record(pkg, info, AppLockReasons())
                 continue
@@ -141,8 +147,8 @@ object Policy {
             val newInstall = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now, installWaitMs) != null
             val categoryExemption = if (newInstall && neverRule == null) PlayCategoryLookup.exemption(c, pkg) else null
             val reasons = AppLockReasons(
-                keywordServiceMissing = keywordPaused && keywordFilterOn,
-                domainServiceMissing = keywordPaused && domainRulesOn && !keywordFilterOn,
+                keywordServiceMissing = keywordPaused && keywordFilterOn && name !in ShortFormFeeds.nativePackages,
+                domainServiceMissing = keywordPaused && domainRulesOn && !keywordFilterOn && name !in ShortFormFeeds.nativePackages,
                 accessibilityEnabled = accessibilityEnabled,
                 appLock = isProtected && now >= Store.unlockedUntil(c, name),
                 installWaitUntil = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now,
@@ -151,7 +157,10 @@ object Policy {
                 curboxMissing = isGuarded && curboxDown,
                 neverInstallRule = neverRule,
                 googleVpnMissing = isGoogle && googleVpnMissing,
-                curfewUntil = curfewUntil.takeIf { name in curfewTargets }
+                curfewUntil = curfewUntil.takeIf { name in curfewTargets },
+                categoryCooldownUntil = (now + cooldownRemaining).takeIf { cooldownRemaining > 0 && name in cooldownTargets },
+                categoryServiceMissing = keywordPaused,
+                rapidScrollCooldown = rapidCooldown
             )
             val shouldLock = reasons.shouldLock
             try {

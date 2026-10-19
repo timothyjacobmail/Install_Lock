@@ -356,6 +356,7 @@ class MainActivity : AppCompatActivity() {
             UiStyle.eyebrow(this, "PROTECTION TOOLS"),
             button("Why apps are locked") { goTo { showLockReasons() } },
             curfewActions(),
+            watchdogActions(),
             browserActions(),
             section("Apps", "Choose apps to lock or end an unlock session",
                 button("App locks") { goTo { showAppPicker() } },
@@ -371,6 +372,74 @@ class MainActivity : AppCompatActivity() {
             section("Protection status", "Current app and browser protection",
                 status, label(chromeLockExplanation(locks)), label(curboxStatus()), label(playAccessSummary()))
         )
+    }
+
+    private fun watchdogActions() = section("Browsing & scrolling watchdog", "Website categories and rapid feed scrolling",
+        button("Watchdog status & website categories") { goTo { showCategoryWatchdog() } })
+
+    private fun showCategoryWatchdog() {
+        Policy.sweep(this)
+        val status = label("")
+        val site = EditText(this).apply { hint = "Website URL or domain"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI }
+        val result = label("")
+        val catalog = WatchdogStore.domains(this)
+        fun refreshStatus() {
+            val remaining = WatchdogStore.remaining(this)
+            val seconds = (remaining + 999) / 1000
+            val reason = if (WatchdogStore.rapidCooldown(this)) "Rapid-scrolling" else "Manga/comics"
+            status.text = if (remaining > 0) "$reason cooldown: ${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')} remaining. " +
+                "Browsers, Google, YouTube, Instagram, Reddit and app installations/updates are locked. App passwords cannot end this cooldown."
+                else "No watchdog cooldown is active. Both detectors run while accessibility is connected."
+            if (!Policy.isOwner(this)) status.append("\nDevice owner is required to suspend apps and block installations.")
+            if (remaining > 0) {
+                val installsBlocked = getSystemService(android.os.UserManager::class.java)
+                    .hasUserRestriction(android.os.UserManager.DISALLOW_INSTALL_APPS)
+                status.append(if (installsBlocked) "\nAndroid confirms the installation restriction is active."
+                    else "\nAndroid installation restriction is pending; Install Lock will retry.")
+            }
+            if (!BrowserKeywordService.isReady(this)) status.append("\nAccessibility monitoring is disconnected. Browsers, Google, YouTube, Instagram and Reddit remain locked until it reconnects.")
+        }
+        refreshStatus()
+        screen(label("Browsing & scrolling watchdog", 24f), status,
+            label("Manga/comics sites: warning on entry, final warning at 5 seconds, 30-minute cooldown at 10 seconds total. " +
+                "Only foreground website time counts. Leaving pauses the timer; returning to any categorized site within 10 minutes resumes it. " +
+                "Reboots and app restarts do not clear an active cooldown. Curfew and other locks continue independently."),
+            section("Rapid feed scrolling", "6 vertical scroll bursts within 15 seconds",
+                label("Watches recognized YouTube Shorts, Instagram Reels/home feeds and Reddit feeds in their official apps, " +
+                    "plus their supported website URLs in browsers that expose the full native address. " +
+                    "One continuous fling counts as one burst. After detection, a warning appears, a final warning follows at 5 seconds, " +
+                    "and 10 seconds of continued rapid activity starts the shared 30-minute cooldown."),
+                label("Leaving the feed pauses the timer. Stopping scrolling pauses it after up to 3 seconds of inactivity; " +
+                    "rapid activity within 10 minutes resumes accumulated warning time, including across supported apps. " +
+                    "Watching one video without scrolling does not count. Identifiable comments, messages, search and settings screens are excluded."),
+                label("Detection uses local accessibility signals, not saved browsing history. It is best effort: app updates, " +
+                    "translated controls, hidden URL paths or missing scroll events can prevent detection. It does not recognize every short-form service. " +
+                    "An existing cooldown survives restarts and cannot be cleared with an app password.")),
+            section("Website classification", "${catalog.size} offline domains, including MangaDex and Webtoons",
+                label("Uses the bundled UT1 manga/comics category plus your additions. It includes comics-related sites broadly. " +
+                    "Unknown domains remain unclassified; word mentions, search-result links and background DNS requests do not count as a website visit. " +
+                    "Detection requires a browser that exposes its native address. Existing keyword and domain blocks still act immediately."),
+                site, button("Check category") {
+                    val host = DomainRules.hostFromAddress(site.text.toString())
+                    result.text = if (host == null) "Enter a website domain or http(s) URL."
+                        else WebsiteCategories(WatchdogStore.domains(this)).mangaDomain(host)?.let { "Manga/comics category: $it" }
+                            ?: "Unclassified: $host. You can add it to the category below."
+                }, result,
+                button("Add website to manga/comics category") {
+                    result.text = if (WatchdogStore.addDomain(this, site.text.toString())) "Added immediately, including subdomains."
+                        else "Enter a valid website domain or http(s) URL."
+                }),
+            section("Data source & license", "Universite Toulouse Capitole · CC BY-SA 4.0",
+                label(assets.open("categories/README.txt").bufferedReader().use { it.readText() }, 13f)),
+            button("Refresh") { refreshStatus(); Policy.sweep(this) }, button("Back") { back() })
+        status.postDelayed(object : Runnable {
+            override fun run() {
+                if (status.isAttachedToWindow && !isFinishing && !isDestroyed) {
+                    refreshStatus()
+                    status.postDelayed(this, 1000)
+                }
+            }
+        }, 1000)
     }
 
     private fun curfewActions() = section("Night curfew", "11 pm–4 am · takes priority over app unlocks",
@@ -412,6 +481,7 @@ class MainActivity : AppCompatActivity() {
             label("The main password opens this dashboard. Each sensitive operation needs its own task password."),
             button("Why apps are locked") { goTo { showLockReasons() } },
             curfewActions(),
+            watchdogActions(),
             section("App access", "Separate access, removal and duration passwords for each app",
                 button("Temporarily unlock one app") { goTo { showAppAccess() } },
                 button("App locks") { goTo { showAppPicker() } },
@@ -1553,6 +1623,9 @@ class MainActivity : AppCompatActivity() {
         screen(label("About Install Lock", 22f),
             label("Device protection, app locks and website rules in one place."),
             label("Visual design inspired by Curbox: Material 3 surfaces, rounded cards and Inter typography."),
+            section("Website category data", "UT1 manga/comics catalog · CC BY-SA 4.0",
+                label(assets.open("categories/README.txt").bufferedReader().use { it.readText() }, 13f),
+                label(assets.open("licenses/CC-BY-SA-4.0.txt").bufferedReader().use { it.readText() }, 13f)),
             section("Inter font license", "The Inter Project Authors · SIL Open Font License 1.1",
                 label(assets.open("licenses/Inter-OFL.txt").bufferedReader().use { it.readText() }, 13f)),
             button("Back") { back() })

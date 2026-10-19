@@ -14,12 +14,24 @@ data class AppLockReasons(
     val neverInstallRule: String? = null,
     val googleVpnMissing: Boolean = false,
     val domainServiceMissing: Boolean = false,
-    val curfewUntil: Long? = null
+    val curfewUntil: Long? = null,
+    val categoryCooldownUntil: Long? = null,
+    val categoryServiceMissing: Boolean = false,
+    val rapidScrollCooldown: Boolean = false
 ) {
     val shouldLock: Boolean get() = keywordServiceMissing || appLock || installWaitUntil != null ||
-            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing || curfewUntil != null
+            otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing || curfewUntil != null ||
+            categoryCooldownUntil != null || categoryServiceMissing
 
     fun descriptions(): List<String> = buildList {
+        categoryCooldownUntil?.let {
+            val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
+            add((if (rapidScrollCooldown) "Rapid-scrolling cooldown until $end: rapid feed scrolling continued after warnings for 10 seconds. "
+                else "Manga/comics category cooldown until $end: a categorized website remained visible for 10 seconds. ") +
+                "Browsers, Google, YouTube, Instagram, Reddit and app installations are locked for 30 minutes. App passwords cannot bypass this cooldown.")
+        }
+        if (categoryServiceMissing) add("The website and rapid-scrolling watchdogs require Install Lock's accessibility service. " +
+            "Browsers, Google, YouTube, Instagram and Reddit stay locked until the service is connected.")
         curfewUntil?.let {
             val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
             add("Night curfew is active until $end. Curfew overrides temporary app unlocks, whitelists and category exemptions. " +
