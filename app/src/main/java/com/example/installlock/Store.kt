@@ -18,6 +18,24 @@ object Store {
     fun setLastUnlockMinutes(c: Context, m: Int) =
         p(c).edit().putInt("lastUnlockMin", m).apply()
 
+    // ---------- apps that must never stay installed ----------
+
+    private val DEFAULT_NEVER_INSTALL = setOf("grok", "webtoon")
+
+    fun neverInstall(c: Context): Set<String> =
+        p(c).getStringSet("neverInstall", DEFAULT_NEVER_INSTALL)!!.toSet()
+
+    fun setNeverInstall(c: Context, s: Set<String>) =
+        p(c).edit().putStringSet("neverInstall", s).apply()
+
+    /** Turns a name, package name or Play Store link into a lowercase rule. Null if unusable. */
+    fun normalizeRule(input: String): String? {
+        var s = input.trim().lowercase()
+        Regex("[?&]id=([a-z0-9._]+)").find(s)?.let { s = it.groupValues[1] }
+        if (s.length < 3 || !Regex("^[a-z0-9._ -]+$").matches(s)) return null
+        return s
+    }
+
     /** The main password, or the separate filter password. */
     enum class Pw(val prefix: String) { MAIN(""), FILTER("f_") }
 
@@ -72,7 +90,20 @@ object Store {
         e.apply()
         return false
     }
+    // ---------- apps that can't be uninstalled ----------
 
+    fun noUninstall(c: Context): Set<String> =
+        p(c).getStringSet("noUninstall", emptySet())!!.toSet()
+
+    fun setNoUninstall(c: Context, s: Set<String>) =
+        p(c).edit().putStringSet("noUninstall", s).apply()
+
+    // ---------- Curbox guard ----------
+
+    fun curboxGuard(c: Context) = p(c).getBoolean("curboxGuard", false)
+
+    fun setCurboxGuard(c: Context, on: Boolean) =
+        p(c).edit().putBoolean("curboxGuard", on).apply()
     private fun hash(pw: String, salt: ByteArray): ByteArray =
         SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
             .generateSecret(PBEKeySpec(pw.toCharArray(), salt, 120_000, 256))

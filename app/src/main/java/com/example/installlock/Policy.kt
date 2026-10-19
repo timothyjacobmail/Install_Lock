@@ -13,6 +13,12 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.app.PendingIntent
+import android.content.pm.PackageInfo
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.view.accessibility.AccessibilityManager
+
+
 object Policy {
     const val LOCK_MS = 15 * 60 * 1000L
 
@@ -56,6 +62,7 @@ object Policy {
 
     fun sweep(c: Context) {
         if (!isOwner(c)) return
+        enforceNoUninstall(c)
         val dpm = dpm(c)
         val admin = admin(c)
         val pm = c.packageManager
@@ -66,18 +73,45 @@ object Policy {
         val protectedApps = Store.protectedApps(c)
         val gateClosed = now >= Store.unlockedUntil(c)
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
+        val neverRules = Store.neverInstall(c)
+
+        // Curbox guard: "down" only after 15 s of its service being off, so updates and reboots don't trip it.
+        val guardOn = Store.curboxGuard(c)
+        var curboxDown = false
+        if (guardOn && !curboxRunning(c)) {
+            if (curboxDownSince == 0L) curboxDownSince = now
+            curboxDown = now - curboxDownSince >= 15_000L
+        } else {
+            curboxDownSince = 0L
+        }
 
         for (pkg in pm.getInstalledPackages(0)) {
             val info = pkg.applicationInfo ?: continue
             val name = pkg.packageName
+            if (name == c.packageName || name == homePkg) continue
             val isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
+
+            // Apps that must never stay installed: suspend at once, then uninstall.
+            if (!isSystem && neverRules.isNotEmpty() &&
+                blockedRule(neverRules, name, labelOf(pm, pkg, info)) != null
+            ) {
+                try {
+                    if (!dpm.isPackageSuspended(admin, name)) {
+                        dpm.setPackagesSuspended(admin, arrayOf(name), true)
+                    }
+                } catch (_: Exception) { }
+                requestUninstall(c, name)
+                continue
+            }
+
             val isProtected = name in protectedApps
             val isBrowser = name in browsers
-            if (isSystem && !isProtected && !isBrowser) continue
-            if (name == c.packageName || name == homePkg) continue
+            val isGuarded = guardOn && name in CURBOX_GUARDED
+            if (isSystem && !isProtected && !isBrowser && !isGuarded) continue
 
             val newInstall = !isSystem && ((now - pkg.firstInstallTime) in 0 until LOCK_MS)
-            val shouldLock = newInstall || (isProtected && gateClosed) || isBrowser
+            val shouldLock = newInstall || (isProtected && gateClosed) || isBrowser ||
+                    (isGuarded && curboxDown)
             try {
                 if (dpm.isPackageSuspended(admin, name) != shouldLock) {
                     dpm.setPackagesSuspended(admin, arrayOf(name), shouldLock)
@@ -87,6 +121,44 @@ object Policy {
         syncChrome(c)
     }
 
+    private val labelCache = HashMap<String, String>()
+    private val uninstallAsked = HashMap<String, Long>()
+
+    /** Lowercase app name, cached until the app is updated. */
+    private fun labelOf(pm: PackageManager, pkg: PackageInfo, info: ApplicationInfo): String =
+        labelCache.getOrPut(pkg.packageName + "|" + pkg.lastUpdateTime) {
+            info.loadLabel(pm).toString().lowercase()
+        }
+
+    /** The rule that makes this app unwelcome: its package name or app name contains it. */
+    private fun blockedRule(rules: Set<String>, pkgName: String, label: String): String? =
+        rules.firstOrNull { pkgName.lowercase().contains(it) || label.contains(it) }
+
+    /** Silent uninstall (a device owner may do this). Asks at most once per 30 seconds per app. */
+    private fun requestUninstall(c: Context, pkg: String) {
+        val now = System.currentTimeMillis()
+        if (now - (uninstallAsked[pkg] ?: 0L) < 30_000L) return
+        uninstallAsked[pkg] = now
+        try {
+            val intent = Intent("com.example.installlock.UNINSTALL_RESULT").setPackage(c.packageName)
+            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                    (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
+            val pi = PendingIntent.getBroadcast(c, 0, intent, flags)
+            c.packageManager.packageInstaller.uninstall(pkg, pi.intentSender)
+        } catch (_: Exception) { }
+    }
+
+    /** Names of installed, non-system apps that a new rule would remove. */
+    fun matchesFor(c: Context, rule: String): List<String> {
+        val pm = c.packageManager
+        return pm.getInstalledPackages(0).mapNotNull { pkg ->
+            val info = pkg.applicationInfo ?: return@mapNotNull null
+            val isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
+            if (isSystem || pkg.packageName == c.packageName) return@mapNotNull null
+            if (blockedRule(setOf(rule), pkg.packageName, labelOf(pm, pkg, info)) == null) null
+            else info.loadLabel(pm).toString()
+        }
+    }
     /** Every app that can open a normal web link, except Chrome and a few essentials. */
     fun otherBrowsers(c: Context): Set<String> {
         val probe = Intent(Intent.ACTION_VIEW, Uri.parse("https://example.com"))
@@ -175,6 +247,45 @@ object Policy {
             else "Screenshots are allowed again."
         } catch (e: Exception) {
             "Error: ${e.message}"
+        }
+    }
+    const val CURBOX = "neth.iecal.curbox"
+
+    /** Paused whenever the Curbox guard is on and Curbox's accessibility service isn't running. */
+    val CURBOX_GUARDED = setOf("com.google.android.youtube", "com.instagram.android")
+
+    private var curboxDownSince = 0L
+
+    fun isInstalled(c: Context, pkg: String): Boolean =
+        try { c.packageManager.getPackageInfo(pkg, 0); true } catch (_: Exception) { false }
+
+    /** True if Curbox's accessibility service is currently enabled. */
+    fun curboxRunning(c: Context): Boolean {
+        val am = c.getSystemService(AccessibilityManager::class.java)
+        return am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .any { it.resolveInfo?.serviceInfo?.packageName == CURBOX }
+    }
+
+    /** Chosen apps (plus Install Lock itself) can't be uninstalled, force-stopped or have data cleared. */
+    fun enforceNoUninstall(c: Context) {
+        val dpm = dpm(c)
+        val admin = admin(c)
+        val wanted = (Store.noUninstall(c) + c.packageName).filter { isInstalled(c, it) }
+        try {
+            for (pkg in wanted) {
+                if (!dpm.isUninstallBlocked(admin, pkg)) dpm.setUninstallBlocked(admin, pkg, true)
+            }
+            if (dpm.getUserControlDisabledPackages(admin).toSet() != wanted.toSet()) {
+                dpm.setUserControlDisabledPackages(admin, wanted)
+            }
+        } catch (_: Exception) { }
+    }
+
+    /** Lifts the uninstall block for apps removed from the list. */
+    fun allowUninstall(c: Context, pkgs: Collection<String>) {
+        if (!isOwner(c)) return
+        for (pkg in pkgs) {
+            try { dpm(c).setUninstallBlocked(admin(c), pkg, false) } catch (_: Exception) { }
         }
     }
 }
