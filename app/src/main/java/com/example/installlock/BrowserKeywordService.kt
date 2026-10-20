@@ -7,13 +7,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.app.KeyguardManager
+import android.os.Bundle
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.Toast
+import com.example.delayedsecrect.SecretClipboard
+import com.example.delayedsecrect.ClipboardCleanupActivity
+import com.example.delayedsecrect.PasswordFieldEntry
+import com.example.delayedsecrect.PasswordEntryResult
 
 /** Reads browser pages and visible Google app content locally; never saves the inspected text. */
 @Suppress("DEPRECATION")
@@ -21,6 +29,7 @@ class BrowserKeywordService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var targets = setOf(Policy.CHROME, BrowserPackages.GOOGLE_APP)
     private var scanScheduled = false
+    private var nextScanAt = 0L
     private var handlingMatch = false
     private var registered = false
     private var lastWords = emptySet<String>()
@@ -28,6 +37,7 @@ class BrowserKeywordService : AccessibilityService() {
     private var lastGenericExceptions = emptySet<String>()
     private var pageFilter = KeywordPageFilter(emptySet())
     private val queryTextCache = ParsedValueCache<List<String>, GoogleResultText>(::GoogleResultText)
+    private val chromeNavigationCache = ParsedValueCache<ChromeNavigationConfig, ChromeNavigationFilter>(::ChromeNavigationFilter)
     private val prefs by lazy { getSharedPreferences("install_lock", Context.MODE_PRIVATE) }
     private val watchdogWarnings by lazy { WatchdogWarningBanner(this) }
     private val categoryWatchdog by lazy {
@@ -37,7 +47,8 @@ class BrowserKeywordService : AccessibilityService() {
         RapidScrollMonitor(this, handler, { targets }, watchdogWarnings) { root, browser -> browserAddress(root, browser, visibleOnly = false) }
     }
 
-    private fun filteringRequired() = Store.browserKeywordFilterEnabled(this) || Store.domainRules(this).isNotEmpty()
+    private fun filteringRequired() = Store.browserKeywordFilterEnabled(this) || Store.domainRules(this).isNotEmpty() ||
+        Store.chromeLock(this) || Store.extraLockedSites(this).isNotEmpty()
 
     private val preferenceListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
         if (key == "browserKeywords" || key == "keywordRemovalRequests" ||
@@ -48,6 +59,10 @@ class BrowserKeywordService : AccessibilityService() {
         if (key == "domainRules") {
             if (filteringRequired()) scheduleScan(0) else onInterrupt()
             Policy.sweep(this)
+        }
+        if (key == "chromeLock" || key == "sites" || key == "extraLockedSites" || key == "extraSiteRemovalRequests") {
+            if (filteringRequired()) scheduleScan(0)
+            else { handler.removeCallbacks(scan); scanScheduled = false }
         }
     }
     private val packageReceiver = object : BroadcastReceiver() {
@@ -71,6 +86,10 @@ class BrowserKeywordService : AccessibilityService() {
             registered = true
         }
         connected = true
+        PasswordFieldEntry.attach(::enterFocusedPassword)
+        SecretClipboard.attachAccessibility(this, ::updateEventPackages) {
+            startActivity(ClipboardCleanupActivity.openIntent(this))
+        }
         categoryWatchdog.start()
         rapidScrollWatchdog.start()
         Policy.sweep(this)
@@ -81,18 +100,70 @@ class BrowserKeywordService : AccessibilityService() {
         // Some Android versions hide suspended handlers from intent queries. Keep their targets
         // registered before the guard releases them as this service reconnects.
         targets = BrowserPackages.keywordTargets(this) + (Store.keywordGuardPackages(this) - ShortFormFeeds.nativePackages)
-        serviceInfo = serviceInfo.apply { packageNames = (targets + ShortFormFeeds.nativePackages).toTypedArray() }
+        updateEventPackages()
+    }
+
+    private fun updateEventPackages() {
+        // Observe other apps only for the one-copy "until pasted" option. Their page
+        // content is never scanned; normal browser filtering still uses targets below.
+        serviceInfo = serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            packageNames = if (SecretClipboard.watchingPaste) null else (targets + ShortFormFeeds.nativePackages).toTypedArray()
+        }
+    }
+
+    private fun enterFocusedPassword(value: String): PasswordEntryResult {
+        if (getSystemService(KeyguardManager::class.java).isDeviceLocked)
+            return PasswordEntryResult(false, "Unlock your phone, then tap the app's password field.")
+        // A touch on a floating window can make it the active accessibility window.
+        // The input-focused application window remains the intended destination.
+        val focusedWindow = windows.firstOrNull { it.isFocused && it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        val root = focusedWindow?.root ?: rootInActiveWindow
+            ?: return PasswordEntryResult(false, "Open the target app and tap its password field first.")
+        try {
+            if (root.packageName?.toString() == "com.android.systemui")
+                return PasswordEntryResult(false, "Open the target app's password field first.")
+            val field = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: return PasswordEntryResult(false, "Tap the password field, then press Enter password here.")
+            try {
+                if (!PasswordFieldTarget.eligible(field.isFocused, field.isVisibleToUser, field.isEnabled,
+                        field.isEditable, field.actionList.any { it.id == AccessibilityNodeInfo.ACTION_SET_TEXT },
+                        field.isPassword, field.inputType))
+                    return PasswordEntryResult(false, "Select an editable password field. Search boxes and ordinary text fields are not filled.")
+                val entered = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+                })
+                return if (entered) PasswordEntryResult(true, "Password entered. Use the app's own confirm button when ready.")
+                else PasswordEntryResult(false, "This app did not allow direct password entry. Nothing was copied.")
+            } finally { field.recycle() }
+        } finally { root.recycle() }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        try { SecretClipboard.onAccessibilityEvent(event) } catch (_: RuntimeException) {
+            // A transient clipboard or accessibility error must not interrupt browser enforcement.
+        }
         if (event != null) try { rapidScrollWatchdog.onScroll(event) } catch (_: RuntimeException) {
             // Navigation can invalidate a scroll event's source while it is being inspected.
         }
-        if (event?.packageName?.toString() in targets) scheduleScan(0)
+        if (event?.packageName?.toString() in targets) {
+            val navigation = event?.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+                event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            // Taps and window changes preempt the poll. Continuous video, text and scroll
+            // updates keep the normal rate instead of repeatedly scanning the whole page.
+            scheduleScan(if (navigation) 0 else 500)
+        }
     }
 
     private fun scheduleScan(delay: Long) {
-        if (scanScheduled || handlingMatch || !filteringRequired()) return
+        if (handlingMatch || !filteringRequired()) return
+        val due = SystemClock.uptimeMillis() + delay
+        if (scanScheduled) {
+            if (nextScanAt <= due) return
+            // A navigation event must not wait behind the next periodic content scan.
+            handler.removeCallbacks(scan)
+        }
+        nextScanAt = due
         scanScheduled = true
         handler.postDelayed(scan, delay)
     }
@@ -108,6 +179,17 @@ class BrowserKeywordService : AccessibilityService() {
         try {
             val browser = root.packageName?.toString() ?: return
             if (browser !in targets) return
+            if (browser == Policy.CHROME) {
+                val address = browserAddress(root, browser, visibleOnly = false)
+                val config = ChromeNavigationConfig(Store.chromeLock(this), Store.activePatterns(this),
+                    Store.extraLockedSites(this).map { it.domain }.toSet())
+                val blocked = address?.let { chromeNavigationCache.get(config).block(it) }
+                if (address != null && blocked != null) {
+                    if (blocked == ChromeNavigationBlock.WHITELIST) recoverBlockedSite(address)
+                    else closeTabOrLeave(root, browser, "This domain is in your extra locked sites")
+                    return
+                }
+            }
             val domainRules = Store.domainRules(this)
             if (browser != BrowserPackages.GOOGLE_APP && domainRules.isNotEmpty()) {
                 val host = browserHost(root, browser)
@@ -295,6 +377,25 @@ class BrowserKeywordService : AccessibilityService() {
         return try { clickMenuItem(parent, depth + 1) } finally { parent.recycle() }
     }
 
+    private fun recoverBlockedSite(address: String) {
+        handlingMatch = true
+        val root = rootInActiveWindow
+        try {
+            if (root?.packageName?.toString() == Policy.CHROME) {
+                // Cover the blocked page without closing the tab before its URL can be
+                // requested through the normal password-protected whitelist form.
+                startActivity(BlockedSiteActivity.openIntent(this, address))
+            }
+        } catch (_: RuntimeException) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            Toast.makeText(this, "Site blocked. Open Chrome's whitelist in Install Lock to add a site.", Toast.LENGTH_LONG).show()
+        } finally {
+            root?.recycle()
+            handlingMatch = false
+            scheduleScan(500)
+        }
+    }
+
     private fun recoverGoogleSearch(word: String, query: String?) {
         handlingMatch = true
         val root = rootInActiveWindow
@@ -343,6 +444,8 @@ class BrowserKeywordService : AccessibilityService() {
 
     override fun onDestroy() {
         connected = false
+        PasswordFieldEntry.detach()
+        SecretClipboard.detachAccessibility()
         onInterrupt()
         prefs.unregisterOnSharedPreferenceChangeListener(preferenceListener)
         if (registered) unregisterReceiver(packageReceiver)
@@ -352,6 +455,8 @@ class BrowserKeywordService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         connected = false
+        PasswordFieldEntry.detach()
+        SecretClipboard.detachAccessibility()
         onInterrupt()
         Policy.sweep(this)
         return super.onUnbind(intent)

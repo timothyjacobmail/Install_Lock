@@ -31,8 +31,27 @@ class SitePatternTest {
 
     @Test fun allSuggestedChoicesCanBeSavedWithoutChangingTheirScope() {
         for (text in listOf("https://reddit.com/r/sharks/posts", "https://www.example.com/Read/Post/",
-            "https://example.com:8443/A%2Fb/Page?tracking=private")) {
+            "https://example.com:8443/A%2Fb/Page?tracking=private", "http://localhost:40715/callback?state=example-state&code=example-code")) {
             for (choice in SharedSite.whitelistOptions(text)) assertEquals(choice, SitePattern.normalize(choice))
         }
+    }
+
+    @Test fun acceptsLocalCallbacksAndDropsTemporarySignInParameters() {
+        val callback = "http://LOCALHOST:40715/callback?state=example-state&iss=https://accounts.example&code=example-code&scope=email+profile#complete"
+        assertEquals("localhost:40715/callback", SitePattern.normalizeForEntry(callback))
+        assertEquals("localhost:40715/callback", SitePattern.normalize("localhost:40715/callback"))
+        assertEquals("localhost/callback", SitePattern.normalize("localhost/callback"))
+        assertEquals("localhost", SitePattern.normalizeForEntry("http://localhost/?code=example-code"))
+        assertEquals("localhost:40715", SitePattern.normalizeForEntry("http://localhost:40715?state=example-state"))
+        assertEquals("127.0.0.1:40715/callback", SitePattern.normalizeForEntry("http://127.0.0.1:40715/callback?code=example-code"))
+    }
+
+    @Test fun localSupportDoesNotAcceptArbitraryWordsOrInvalidPorts() {
+        for (text in listOf("ordinarytext", "intranet/callback", "localhost:0/callback", "localhost:65536/callback",
+            "localhost:bad/callback", "localhost:40715/callback|other.example", "localhost/*", "file://localhost/callback"))
+            assertNull(text, SitePattern.normalize(text))
+        // Intentional query-scoped website rules retain their existing semantics.
+        assertEquals("youtube.com/watch?v=allowed", SitePattern.normalize("https://youtube.com/watch?v=allowed"))
+        assertEquals("youtube.com/watch?v=allowed", SitePattern.normalizeForEntry("https://youtube.com/watch?v=allowed"))
     }
 }

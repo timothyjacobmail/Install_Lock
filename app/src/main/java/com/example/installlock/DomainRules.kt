@@ -49,6 +49,7 @@ internal class DomainRules(private val rules: List<DomainRule>) {
     companion object {
         private val hostLabel = Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
         private val containsValue = Regex("[a-z0-9][a-z0-9.-]{0,79}")
+        private val schemePrefix = Regex("^[a-z][a-z0-9+.-]*://", RegexOption.IGNORE_CASE)
         fun normalizeHost(input: String): String? {
             val host = try { IDN.toASCII(input.trim().trimEnd('.'), IDN.USE_STD3_ASCII_RULES).lowercase(Locale.ROOT) }
                 catch (_: Exception) { return null }
@@ -67,7 +68,8 @@ internal class DomainRules(private val rules: List<DomainRule>) {
         fun hostFromAddress(input: String): String? {
             val text = input.trim()
             if (text.isEmpty() || text.length > 8192 || text.any { it.isWhitespace() }) return null
-            val uri = try { URI(if ("://" in text) text else "https://$text") } catch (_: Exception) { return null }
+            val explicitScheme = schemePrefix.containsMatchIn(text)
+            val uri = try { URI(if (explicitScheme) text else "https://$text") } catch (_: Exception) { return null }
             if (uri.scheme?.lowercase(Locale.ROOT) !in setOf("https", "http")) return null
             val authority = uri.rawAuthority?.substringAfterLast('@') ?: return null
             if (':' in authority) {
@@ -77,8 +79,9 @@ internal class DomainRules(private val rules: List<DomainRule>) {
             }
             val host = normalizeHost(authority.substringBefore(':')) ?: return null
             // An unfocused omnibox can display a search query. A lone word is ambiguous;
-            // single-label intranet hosts must include their explicit http(s) scheme.
-            if ("://" !in text && '.' !in host) return null
+            // Only the known localhost name is unambiguous enough for a scheme-elided
+            // local callback. Other single-label intranet hosts still need http(s).
+            if (!explicitScheme && '.' !in host && host != "localhost") return null
             return host
         }
     }

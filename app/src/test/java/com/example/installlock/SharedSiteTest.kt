@@ -74,7 +74,7 @@ class SharedSiteTest {
     @Test
     fun malformedOrOverbroadSharedAddressesHaveNoSuggestedChoices() {
         for (text in listOf(null, "", "ordinary text", "file:///etc/hosts", "https://*.example.com/a",
-            "https://localhost/a", "https://co.uk/path", "https://example.com:0/path", "https://example.com:65536/path")) {
+            "https://intranet/a", "https://co.uk/path", "https://example.com:0/path", "https://example.com:65536/path")) {
             assertEquals(text, emptyList<String>(), SharedSite.whitelistOptions(text))
         }
     }
@@ -117,5 +117,30 @@ class SharedSiteTest {
         assertEquals(listOf("example.com"), SharedSite.whitelistOptions("Interesting page\nwww.example.com\nhttps://search.app/xyz"))
         assertEquals(emptyList<String>(), SharedSite.whitelistOptions("Sleep tips 16.114.3\nhttps://share.google/abc"))
         assertEquals(listOf("hubermanlab.com"), SharedSite.whitelistOptions("www\\.hubermanlab.com https://share.google/abc"))
+    }
+
+    @Test fun localCallbackChoicesPreserveThePortAndPathButNeverTheSignInTokens() {
+        val callback = "http://localhost:40715/callback?state=example-state&iss=https://accounts.example&code=example-code&scope=email+profile"
+        val expected = listOf("localhost:40715/callback", "localhost:40715")
+        assertEquals(expected, SharedSite.whitelistOptions(callback))
+        assertEquals(expected, SharedSite.whitelistOptions("Sign in\n$callback"))
+        assertEquals(expected, SharedSite.whitelistOptions(callback.removePrefix("http://")))
+        assertNull(SharedSite.shortLinkFromText(callback))
+    }
+
+    @Test fun aUrlInsideAQueryDoesNotReplaceTheActualWebsite() {
+        assertEquals(listOf("example.com/redirect", "example.com"),
+            SharedSite.whitelistOptions("example.com/redirect?next=https://another.example/path"))
+        // Domain-only blocking still does not invent an Internet domain for a local callback.
+        assertNull(SharedSite.domainFromText("localhost:40715/callback?iss=https://accounts.example"))
+    }
+
+    @Test fun localhostAndLoopbackAddressesOfferTheUsualPathHierarchy() {
+        assertEquals(listOf("localhost/Auth/Callback", "localhost/Auth/", "localhost"),
+            SharedSite.whitelistOptions("http://localhost/Auth/Callback?code=example-code#complete"))
+        assertEquals(listOf("127.0.0.1:40715/callback", "127.0.0.1:40715"),
+            SharedSite.whitelistOptions("http://127.0.0.1:40715/callback?state=example-state"))
+        assertEquals(listOf("localhost:40715"), SharedSite.whitelistOptions("http://localhost:40715?state=example-state"))
+        assertEquals(listOf("localhost"), SharedSite.whitelistOptions("localhost"))
     }
 }

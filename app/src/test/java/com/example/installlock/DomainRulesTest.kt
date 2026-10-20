@@ -74,6 +74,9 @@ class DomainRulesTest {
         assertEquals("manga.org", DomainRules.hostFromAddress("MANGA.org:8443/path"))
         assertEquals("evil.com", DomainRules.hostFromAddress("https://manga.org@evil.com/path"))
         assertEquals("intranet", DomainRules.hostFromAddress("https://intranet/path"))
+        assertEquals("example.org", DomainRules.hostFromAddress("example.org/redirect?next=https://manga.org/"))
+        assertEquals("localhost", DomainRules.hostFromAddress("localhost:40715/callback?iss=https://accounts.example"))
+        assertEquals("localhost", DomainRules.hostFromAddress("http://localhost:40715/callback"))
     }
 
     @Test fun addressParsingRejectsSearchTextAndBrowserInternalPages() {

@@ -878,6 +878,7 @@ class MainActivity : AppCompatActivity() {
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
         col.addView(label("Chrome whitelist", 22f))
         col.addView(label(info))
+        col.addView(label("Path checks stay active when a site changes pages without reloading. Keep Install Lock's accessibility service connected."))
         col.addView(button("Extra locked sites") { goTo { showExtraLockedSites() } })
         col.addView(lockBtn)
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -890,7 +891,7 @@ class MainActivity : AppCompatActivity() {
     private fun showAddSite(initialSite: String = "", suggestedSites: List<String> = emptyList(), shareNotice: String = "") {
         val siteWait = Store.timingConfig(this)[TimingOption.SITE_WAIT]
         val site = EditText(this)
-        site.hint = "example.com or example.com/path"
+        site.hint = "example.com/path or localhost:40715/callback"
         site.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         site.setText(initialSite)
         site.setSelection(site.text.length)
@@ -917,7 +918,8 @@ class MainActivity : AppCompatActivity() {
         val views = mutableListOf<View>(
             label("Add a site", 22f),
             label("It becomes usable in Chrome $siteWait minutes after you add it. " +
-                    "A domain also allows its subdomains. Path entries allow URLs that start with that path.")
+                    "A domain also allows its subdomains. Path entries allow URLs that start with that path. " +
+                    "Local callbacks are supported without their temporary sign-in parameters.")
         )
         if (choices != null) views.addAll(listOf(
             label("Choose how much of this site to allow", 20f),
@@ -930,7 +932,7 @@ class MainActivity : AppCompatActivity() {
             button(if (choices != null) "Add selected address" else "Add") {
                 val s = Store.normalizeSite(site.text.toString())
                 when {
-                    s == null -> msg.text = "That doesn't look like a specific site. Use something like example.com."
+                    s == null -> msg.text = "Use a website address such as example.com/path or localhost:40715/callback."
                     Store.sites(this).any { it.pattern == s } -> msg.text = "$s is already on the list."
                     else -> {
                         withTaskPassword(TaskScope(TaskKind.WHITELIST_ADD), "Whitelist only $s", mapOf("site" to s)) { password ->

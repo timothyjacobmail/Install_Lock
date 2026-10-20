@@ -6,20 +6,24 @@ import java.util.Locale
 internal object SharedSite {
     private val webUrl = Regex("https?://[^\\s<>\"]+", RegexOption.IGNORE_CASE)
     private val domain = Regex("^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+    private val schemePrefix = Regex("^[a-z][a-z0-9+.-]*://", RegexOption.IGNORE_CASE)
 
     private fun uriFromText(text: String?): URI? {
         val value = text?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        val candidate = webUrl.find(value)?.value ?: value
-        if (candidate.length > 8192) return null
-        val url = if (candidate.contains("://")) candidate else "https://$candidate"
-        val uri = try { URI(url) } catch (_: Exception) { return null }
-        if (!uri.scheme.equals("https", true) && !uri.scheme.equals("http", true)) return null
-        return uri
+        fun parse(candidate: String): URI? {
+            if (candidate.length > 8192) return null
+            val url = if (schemePrefix.containsMatchIn(candidate)) candidate else "https://$candidate"
+            val uri = try { URI(url) } catch (_: Exception) { return null }
+            if (!uri.scheme.equals("https", true) && !uri.scheme.equals("http", true)) return null
+            return uri.takeIf { host(it, includeLocal = true) != null }
+        }
+        // Prefer the actual address over a URL embedded inside its query (e.g. OAuth's iss).
+        return parse(value) ?: webUrl.find(value)?.value?.let(::parse)
     }
 
-    private fun host(uri: URI): String? {
+    private fun host(uri: URI, includeLocal: Boolean = false): String? {
         val host = uri.host?.lowercase(Locale.ROOT)?.trimEnd('.')?.removePrefix("www.") ?: return null
-        return host.takeIf { domain.matches(it) }
+        return host.takeIf { domain.matches(it) || includeLocal && SitePattern.isLocalHost(it) }
     }
 
     /** Host-only extraction remains available for rules that block entire domains. */
@@ -36,7 +40,7 @@ internal object SharedSite {
                 .mapNotNull { uriFromText(it) }.firstOrNull { !GoogleShareResolver.isWrapper(it) }
                 ?: return emptyList()
         }
-        val host = host(uri) ?: return emptyList()
+        val host = host(uri, includeLocal = true) ?: return emptyList()
         val authority = host + if (uri.port != -1) ":${uri.port}" else ""
         // A literal '*' in a real path must not turn into a whitelist wildcard.
         val path = uri.rawPath.orEmpty().replace("*", "%2A")
@@ -51,8 +55,11 @@ internal object SharedSite {
         return options.toList()
     }
 
-    private fun directWebsite(text: String?): URI? = webUrl.findAll(text.orEmpty()).mapNotNull { uriFromText(it.value) }
-        .firstOrNull { !GoogleShareResolver.isWrapper(it) }
+    private fun directWebsite(text: String?): URI? {
+        uriFromText(text)?.takeIf { !GoogleShareResolver.isWrapper(it) }?.let { return it }
+        return webUrl.findAll(text.orEmpty()).mapNotNull { uriFromText(it.value) }
+            .firstOrNull { !GoogleShareResolver.isWrapper(it) }
+    }
 
     fun shortLinkFromText(text: String?): String? {
         if (directWebsite(text) != null) return null

@@ -259,7 +259,7 @@ object Store {
     }
 
     /** "https://www.Example.com/" -> "example.com". Null if it isn't a specific, safe site. */
-    fun normalizeSite(input: String): String? = SitePattern.normalize(input)
+    fun normalizeSite(input: String): String? = SitePattern.normalizeForEntry(input)
 
     fun chromeLock(c: Context) = p(c).getBoolean("chromeLock", false)
 
