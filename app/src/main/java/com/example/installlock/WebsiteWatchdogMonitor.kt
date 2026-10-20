@@ -16,6 +16,8 @@ internal class WebsiteWatchdogMonitor(
     private val hostReader: (AccessibilityNodeInfo, String) -> String?
 ) {
     private var running = false
+    private var catalog: Set<String>? = null
+    private var categories = WebsiteCategories(emptySet())
     private var lastBrowser: String? = null
     private var lastHost: String? = null
     private var lastWindow = -1
@@ -74,8 +76,9 @@ internal class WebsiteWatchdogMonitor(
                     lastHost = host; lastBrowser = pkg; lastWindow = root.windowId; lastTitle = page.title
                 } else if (!page.hasPage || lastBrowser != pkg || lastWindow != root.windowId ||
                     page.title.isNullOrEmpty() || page.title != lastTitle) clearPage()
-                classified = page.hasPage &&
-                    WebsiteCategories(WatchdogStore.domains(service)).mangaDomain(lastHost) != null
+                val domains = WatchdogStore.domains(service)
+                if (catalog !== domains) { catalog = domains; categories = WebsiteCategories(domains) }
+                classified = page.hasPage && categories.mangaDomain(lastHost) != null
             } else clearPage()
             val state = WatchdogStore.observe(service, classified)
             if (state.untilWall != 0L) {

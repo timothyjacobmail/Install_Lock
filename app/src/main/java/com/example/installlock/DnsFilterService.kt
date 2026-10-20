@@ -20,7 +20,10 @@ import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.util.concurrent.Executors
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.RejectedExecutionException
 
 class DnsFilterService : VpnService() {
 
@@ -42,7 +45,10 @@ class DnsFilterService : VpnService() {
     @Volatile private var tun: ParcelFileDescriptor? = null
     @Volatile private var reader: Thread? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val pool = Executors.newFixedThreadPool(8)
+    // Bound pending UDP work; DNS clients retry packets if a burst exceeds this capacity.
+    private val pool = ThreadPoolExecutor(8, 8, 30, TimeUnit.SECONDS,
+        ArrayBlockingQueue<Runnable>(128)).apply { allowCoreThreadTimeOut(true) }
+    private val upstreamSockets = mutableSetOf<DatagramSocket>()
     @Volatile private var running = false
 
     override fun onCreate() {
@@ -97,6 +103,9 @@ class DnsFilterService : VpnService() {
         tun = null
         reader?.interrupt()
         reader = null
+        pool.queue.clear()
+        upstreamSockets.forEach { it.close() }
+        upstreamSockets.clear()
         if (activeService === this) activeService = null
         try { old?.close() } catch (_: Exception) { }
         notifyPolicy()
@@ -140,17 +149,9 @@ class DnsFilterService : VpnService() {
                 val n = input.read(buf)
                 if (!running || tun !== fd) break
                 if (n < 0) break
-                if (n < 28) continue
-                if ((buf[0].toInt() shr 4) != 4) continue          // IPv4 only
-                if (buf[9].toInt() != 17) continue                  // UDP only
-                val ihl = (buf[0].toInt() and 0x0F) * 4
-                if (n < ihl + 8 + 12) continue
-                if (u16(buf, ihl + 2) != 53) continue               // DNS only
-                val end = minOf(n, ihl + u16(buf, ihl + 4))
-                val clientIp = buf.copyOfRange(12, 16)
-                val clientPort = u16(buf, ihl)
-                val query = buf.copyOfRange(ihl + 8, end)
-                pool.execute { handle(output, query, clientIp, clientPort) }
+                val request = DnsPacket.request(buf, n) ?: continue
+                try { pool.execute { if (running && tun === fd) handle(fd, output, request.query, request.clientIp, request.clientPort) } }
+                catch (_: RejectedExecutionException) { /* Drop this UDP packet; keep the tunnel alive. */ }
             }
         } catch (_: Exception) { }
         finally {
@@ -158,18 +159,18 @@ class DnsFilterService : VpnService() {
         }
     }
 
-    private fun handle(out: FileOutputStream, query: ByteArray, clientIp: ByteArray, clientPort: Int) {
+    private fun handle(fd: ParcelFileDescriptor, out: FileOutputStream, query: ByteArray, clientIp: ByteArray, clientPort: Int) {
         try {
             val parsed = parseQuestion(query)
             if (parsed != null && (Store.isBlocked(this, parsed.first) ||
                         DomainRules(Store.domainRules(this)).match(parsed.first)?.rule?.action == DomainAction.BLOCK)) {
                 DnsLog.add(parsed.first, true)
-                reply(out, clientIp, clientPort, nxdomain(query, parsed.second))
+                reply(fd, out, clientIp, clientPort, nxdomain(query, parsed.second))
                 return
             }
             if (parsed != null) DnsLog.add(parsed.first, false)
-            val answer = forward(query) ?: return
-            reply(out, clientIp, clientPort, answer)
+            val answer = forward(fd, query) ?: return
+            reply(fd, out, clientIp, clientPort, answer)
         } catch (_: Exception) { }
     }
 
@@ -201,17 +202,23 @@ class DnsFilterService : VpnService() {
     }
 
     /** Ask the network's own DNS server, bypassing our VPN. */
-    private fun forward(query: ByteArray): ByteArray? {
+    private fun forward(fd: ParcelFileDescriptor, query: ByteArray): ByteArray? {
         val server = upstream() ?: return null
         DatagramSocket().use { s ->
-            protect(s)
-            s.soTimeout = Store.timingConfig(this).milliseconds(TimingOption.DNS_TIMEOUT).toInt()
-            s.connect(InetSocketAddress(server, 53))
-            s.send(DatagramPacket(query, query.size))
-            val buf = ByteArray(4096)
-            val p = DatagramPacket(buf, buf.size)
-            s.receive(p)
-            return buf.copyOf(p.length)
+            synchronized(this) {
+                if (!running || tun !== fd) return null
+                upstreamSockets.add(s)
+            }
+            try {
+                protect(s)
+                s.soTimeout = Store.timingConfig(this).milliseconds(TimingOption.DNS_TIMEOUT).toInt()
+                s.connect(InetSocketAddress(server, 53))
+                s.send(DatagramPacket(query, query.size))
+                val buf = ByteArray(4096)
+                val p = DatagramPacket(buf, buf.size)
+                s.receive(p)
+                return buf.copyOf(p.length)
+            } finally { synchronized(this) { upstreamSockets.remove(s) } }
         }
     }
 
@@ -223,7 +230,7 @@ class DnsFilterService : VpnService() {
     }
 
     /** Wrap a DNS answer in an IPv4+UDP packet and write it back to the app. */
-    private fun reply(out: FileOutputStream, clientIp: ByteArray, clientPort: Int, dns: ByteArray) {
+    private fun reply(fd: ParcelFileDescriptor, out: FileOutputStream, clientIp: ByteArray, clientPort: Int, dns: ByteArray) {
         val total = 20 + 8 + dns.size
         val p = ByteArray(total)
         p[0] = 0x45                                   // IPv4, 20-byte header
@@ -240,11 +247,10 @@ class DnsFilterService : VpnService() {
         val udpLen = 8 + dns.size
         p[24] = (udpLen shr 8).toByte(); p[25] = udpLen.toByte()
         dns.copyInto(p, 28)                           // UDP checksum left 0 (allowed on IPv4)
-        synchronized(out) { out.write(p) }
+        // Never hold the service lifecycle lock during blocking I/O: closeTunnel must
+        // remain able to close the descriptor and unblock this write.
+        synchronized(out) { if (running && tun === fd) out.write(p) }
     }
-
-    private fun u16(b: ByteArray, i: Int) =
-        ((b[i].toInt() and 0xFF) shl 8) or (b[i + 1].toInt() and 0xFF)
 
     private fun ipChecksum(b: ByteArray, len: Int): Int {
         var sum = 0

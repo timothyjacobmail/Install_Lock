@@ -18,9 +18,9 @@ internal object PlayCategoryLookup {
     private const val REFRESH_MS = 24 * 60 * 60_000L
     private const val MAX_PAGE_BYTES = 4 * 1024 * 1024
 
-    fun exemption(context: Context, pkg: PackageInfo): PlayInstallCategory? {
+    fun exemption(context: Context, pkg: PackageInfo,
+                  selected: Set<String> = Store.immediatePlayCategories(context)): PlayInstallCategory? {
         val c = context.applicationContext
-        val selected = Store.immediatePlayCategories(c)
         if (selected.isEmpty()) return null
         val installer = installer(c, pkg.packageName)
         if (installer != PlayCategoryRules.PLAY_STORE) return null

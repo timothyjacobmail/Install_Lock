@@ -4,6 +4,14 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class KeywordPageFilterTest {
+    @Test fun sharedNormalizationKeepsUnicodeBoundariesAndExceptionPrecedence() {
+        val filter = KeywordPageFilter(setOf("movie", "manga"), mapOf("movie" to setOf("christian")), setOf("educational"))
+        assertEquals("movie", filter.findBlock("ＭＯＶＩＥ"))
+        assertNull(filter.findBlock("ＭＯＶＩＥ\tＣＨＲＩＳＴＩＡＮ"))
+        assertEquals("manga", filter.findBlock("ＭＯＶＩＥ CHRISTIAN ma\u200bnga"))
+        assertNull(filter.findBlock("ＭＯＶＩＥ manga EDUCATIONAL"))
+        assertNull(filter.findBlock("movies mangaka"))
+    }
     private val filter = KeywordPageFilter(setOf("movie", "anime"), mapOf("movie" to setOf("christian")))
 
     @Test fun aBlockedWordWithoutItsExceptionStillBlocks() {

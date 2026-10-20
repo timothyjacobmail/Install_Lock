@@ -17,9 +17,10 @@ internal data class DomainRule(val id: String, val action: DomainAction, val typ
     fun encode() = "$id|${action.name}|${type.name}|$value"
 
     companion object {
+        private val validId = Regex("[A-Za-z0-9-]{1,80}")
         fun decode(raw: String): DomainRule? {
             val parts = raw.split('|')
-            if (parts.size != 4 || !Regex("[A-Za-z0-9-]{1,80}").matches(parts[0])) return null
+            if (parts.size != 4 || !validId.matches(parts[0])) return null
             val action = DomainAction.entries.firstOrNull { it.name == parts[1] } ?: return null
             val type = DomainMatchType.entries.firstOrNull { it.name == parts[2] } ?: return null
             val value = DomainRules.normalizeValue(type, parts[3]) ?: return null
@@ -46,17 +47,19 @@ internal class DomainRules(private val rules: List<DomainRule>) {
     }
 
     companion object {
+        private val hostLabel = Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?")
+        private val containsValue = Regex("[a-z0-9][a-z0-9.-]{0,79}")
         fun normalizeHost(input: String): String? {
             val host = try { IDN.toASCII(input.trim().trimEnd('.'), IDN.USE_STD3_ASCII_RULES).lowercase(Locale.ROOT) }
                 catch (_: Exception) { return null }
             return host.takeIf { it.length in 1..253 && it.split('.').all { label ->
-                label.length in 1..63 && Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").matches(label)
+                label.length in 1..63 && hostLabel.matches(label)
             } }
         }
 
         fun normalizeValue(type: DomainMatchType, input: String): String? = when (type) {
             DomainMatchType.CONTAINS -> Normalizer.normalize(input.trim(), Normalizer.Form.NFKC)
-                .lowercase(Locale.ROOT).takeIf { Regex("[a-z0-9][a-z0-9.-]{0,79}").matches(it) }
+                .lowercase(Locale.ROOT).takeIf { containsValue.matches(it) }
             DomainMatchType.SUFFIX -> normalizeHost(input.trim().removePrefix("*.").removePrefix("."))
             DomainMatchType.EXACT -> normalizeHost(input)
         }

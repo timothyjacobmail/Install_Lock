@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.app.AlarmManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -79,7 +80,12 @@ class LockService : Service() {
         )
         val n = Notification.Builder(this, "lock")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
-            .setContentTitle("Install Lock is active")
+            .setContentTitle(getString(R.string.lock_notification_title))
+            .setContentText(getString(R.string.lock_notification_text))
+            .setContentIntent(PendingIntent.getActivity(this, 0,
+                Intent(this, MainActivity::class.java).setAction(MainActivity.ACTION_LOCK_REASONS)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .build()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
@@ -110,6 +116,7 @@ class LockService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Includes opening Install Lock, boot, and sticky restarts after process death.
+        Policy.updateSupportMessages(this)
         Policy.syncChrome(this, force = true)
         // Re-schedule immediately when settings change; keep exactly one repeating tick.
         handler.removeCallbacks(tick)

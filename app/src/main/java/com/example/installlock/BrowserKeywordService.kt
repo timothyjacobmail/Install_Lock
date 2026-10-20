@@ -27,6 +27,7 @@ class BrowserKeywordService : AccessibilityService() {
     private var lastExceptions = emptyMap<String, Set<String>>()
     private var lastGenericExceptions = emptySet<String>()
     private var pageFilter = KeywordPageFilter(emptySet())
+    private val queryTextCache = ParsedValueCache<List<String>, GoogleResultText>(::GoogleResultText)
     private val prefs by lazy { getSharedPreferences("install_lock", Context.MODE_PRIVATE) }
     private val watchdogWarnings by lazy { WatchdogWarningBanner(this) }
     private val categoryWatchdog by lazy {
@@ -117,6 +118,8 @@ class BrowserKeywordService : AccessibilityService() {
                 }
             }
             val words = if (Store.browserKeywordFilterEnabled(this)) Store.browserKeywords(this) else emptySet()
+            // Domain checks still run above. An empty keyword list cannot match page content.
+            if (words.isEmpty()) { scheduleScan(500); return }
             val exceptions = Store.keywordExceptions(this)
             val genericExceptions = Store.genericKeywordExceptions(this)
             if (words != lastWords || exceptions != lastExceptions || genericExceptions != lastGenericExceptions) {
@@ -127,7 +130,7 @@ class BrowserKeywordService : AccessibilityService() {
             }
             val google = browser == BrowserPackages.GOOGLE_APP
             val query = if (google) googleSearchQuery(root) else null
-            val queryText = if (google) GoogleResultText(listOfNotNull(query, lastSubmittedGoogleQuery)) else null
+            val queryText = if (google) queryTextCache.get(listOfNotNull(query, lastSubmittedGoogleQuery)) else null
             val text = visiblePageText(root, queryText)
             val match = pageFilter.findBlock(text)
             if (match != null) {

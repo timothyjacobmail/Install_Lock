@@ -16,6 +16,7 @@ internal class RapidScrollMonitor(
     private val addressReader: (AccessibilityNodeInfo, String) -> String?
 ) {
     private val bursts = RapidScrollBursts()
+    private val websiteCache = ParsedValueCache<String?, String?>(ShortFormFeeds::website)
     private var running = false
     private data class Feed(val pkg: String, val window: Int, val name: String)
     private var feed: Feed? = null
@@ -97,7 +98,7 @@ internal class RapidScrollMonitor(
             val pkg = root.packageName?.toString().orEmpty()
             val name = when {
                 pkg in ShortFormFeeds.nativePackages -> nativeFeed(root, pkg)
-                pkg in browsers() -> if (hasVisiblePage(root)) ShortFormFeeds.website(addressReader(root, pkg)) else null
+                pkg in browsers() -> if (hasVisiblePage(root)) websiteCache.get(addressReader(root, pkg)) else null
                 else -> null
             }
             val next = name?.let { Feed(pkg, root.windowId, it) }
@@ -158,16 +159,16 @@ internal class RapidScrollMonitor(
             val nav = id.contains("tab") || id.contains("pivot_bar") || id.contains("navigation") ||
                 n.className?.toString()?.endsWith("Tab") == true || n.isClickable &&
                 listOfNotNull(n.text, n.contentDescription).any {
-                    it.toString().substringBefore(',').trim().lowercase() in setOf("shorts", "reels", "home", "popular", "watch")
+                    it.toString().substringBefore(',').trim().lowercase() in ShortFormFeeds.navigationLabels
                 }
             val chosen = selectedTab || nav && (n.isSelected || n.isChecked)
             if (chosen) {
                 listOfNotNull(n.text, n.contentDescription).forEach { value ->
                     val label = value.toString().substringBefore(',').trim().lowercase()
-                    if (label in setOf("shorts", "reels", "home", "popular", "watch")) selected.add(label)
+                    if (label in ShortFormFeeds.navigationLabels) selected.add(label)
                 }
-                if (id in setOf("clips_tab", "clips_tab_icon", "reels_tab")) selected.add("reels")
-                if (id in setOf("feed_tab", "home_tab", "home_tab_icon")) selected.add("home")
+                if (id in ShortFormFeeds.reelsTabs) selected.add("reels")
+                if (id in ShortFormFeeds.homeTabs) selected.add("home")
             }
             for (i in 0 until n.childCount) {
                 if (visited >= 1500) { truncated = true; break }

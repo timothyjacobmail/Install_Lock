@@ -9,16 +9,24 @@ internal object WatchdogStore {
     fun monitoredPackages(c: Context) = BrowserPackages.keywordTargets(c) + ShortFormFeeds.nativePackages
     fun cooldownPackages(c: Context) = monitoredPackages(c) + "com.android.vending"
     private fun prefs(c: Context) = c.getSharedPreferences("category_watchdog", Context.MODE_PRIVATE)
+    @Volatile private var processBoot: Int? = null
+    // A process cannot survive a device reboot. Avoid a settings-provider call every 250ms.
+    private fun boot(c: Context): Int = processBoot ?: synchronized(this) {
+        processBoot ?: Settings.Global.getInt(c.contentResolver, Settings.Global.BOOT_COUNT, 0).also { processBoot = it }
+    }
     fun clock(c: Context) = WatchdogClock(System.currentTimeMillis(), SystemClock.elapsedRealtime(),
-        Settings.Global.getInt(c.contentResolver, Settings.Global.BOOT_COUNT, 0))
+        boot(c))
     @Volatile private var bundled: Set<String>? = null
+    private val domainCache = ParsedValueCache<Pair<Set<String>, Set<String>>, Set<String>> {
+        (catalog, added) -> catalog + WebsiteCategories.additions + added
+    }
     fun domains(c: Context): Set<String> {
         val catalog = bundled ?: synchronized(this) {
             bundled ?: c.assets.open("categories/manga-domains.txt").bufferedReader().use {
                 WebsiteCategories.parse(it.readText())
             }.also { bundled = it }
         }
-        return catalog + WebsiteCategories.additions + prefs(c).getStringSet("addedDomains", emptySet()).orEmpty()
+        return domainCache.get(catalog to prefs(c).getStringSet("addedDomains", emptySet()).orEmpty())
     }
     @Synchronized fun addDomain(c: Context, input: String): Boolean {
         val host = DomainRules.hostFromAddress(input) ?: return false
@@ -26,8 +34,13 @@ internal object WatchdogStore {
         return prefs(c).edit().putStringSet("addedDomains",
             prefs(c).getStringSet("addedDomains", emptySet()).orEmpty() + host).commit()
     }
-    private fun read(c: Context, key: String = "state"): WatchdogState {
-        val a = prefs(c).getString(key, "").orEmpty().split('|')
+    private val categoryStateCache = ParsedValueCache<String, WatchdogState>(::decode)
+    private val rapidStateCache = ParsedValueCache<String, WatchdogState>(::decode)
+    private fun read(c: Context, key: String = "state"): WatchdogState =
+        (if (key == "state") categoryStateCache else rapidStateCache).get(prefs(c).getString(key, "").orEmpty())
+
+    private fun decode(raw: String): WatchdogState {
+        val a = raw.split('|')
         return try {
             if (a.size != 10) WatchdogState() else WatchdogState(a[0].toLong(), a[1].toLong(), a[2].toLong(),
                 a[3].toInt(), a[4].toLong(), a[5].toInt(), a[6] == "1", a[7].toLong(), a[8].toLong(), a[9].toInt())
@@ -43,10 +56,11 @@ internal object WatchdogStore {
     @Synchronized fun observeRapid(c: Context, scrolling: Boolean) = observeKey(c, scrolling, "rapidState")
 
     private fun observeKey(c: Context, visible: Boolean, key: String): WatchdogState {
+        val now = clock(c)
         // A second detector cannot start or extend a cooldown already imposed by the first.
-        if (remaining(c) > 0) return read(c, key)
+        if (remaining(c, now) > 0) return read(c, key)
         val old = read(c, key)
-        val next = CategoryWatchdog.observe(old, visible, clock(c))
+        val next = CategoryWatchdog.observe(old, visible, now)
         if (next != old) {
             write(c, next, next.untilWall != old.untilWall, key)
             if (next.untilWall != 0L) write(c, WatchdogState(), true,
@@ -54,8 +68,8 @@ internal object WatchdogStore {
         }
         return next
     }
-    @Synchronized fun remaining(c: Context): Long {
-        val now = clock(c)
+    @Synchronized fun remaining(c: Context): Long = remaining(c, clock(c))
+    private fun remaining(c: Context, now: WatchdogClock): Long {
         // Rebase once after reboot and clear expired state; never extend a running cooldown.
         return listOf("state", "rapidState").maxOf { key ->
             val old = read(c, key)

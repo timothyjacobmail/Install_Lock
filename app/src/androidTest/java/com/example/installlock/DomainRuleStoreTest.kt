@@ -23,6 +23,18 @@ class DomainRuleStoreTest {
 
     @After fun cleanUp() { prefs.edit().clear().commit() }
 
+    @Test fun parsedRuleCacheTracksPreferenceChangesWithoutWaitingForListeners() {
+        assertTrue(addBlock())
+        val first = Store.domainRules(context)
+        assertSame(first, Store.domainRules(context))
+        prefs.edit().putString("domainRules", "replacement|BLOCK|SUFFIX|example.org").commit()
+        val replacement = Store.domainRules(context)
+        assertEquals("example.org", replacement.single().value)
+        assertEquals("manga", first.single().value)
+        prefs.edit().remove("domainRules").commit()
+        assertTrue(Store.domainRules(context).isEmpty())
+    }
+
     @Test fun blockRulesAreImmediateAndInvalidOrDuplicateRulesDoNotMutateTheList() {
         assertTrue(Store.domainRules(context).isEmpty())
         assertTrue(addBlock())

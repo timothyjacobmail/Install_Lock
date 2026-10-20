@@ -5,6 +5,15 @@ import java.net.URI
 /** Local heuristics, not a claim to recognize every short-form player or physical gesture. */
 internal object ShortFormFeeds {
     val nativePackages = setOf("com.google.android.youtube", "com.instagram.android", "com.reddit.frontpage")
+    internal val navigationLabels = setOf("shorts", "reels", "home", "popular", "watch")
+    internal val reelsTabs = setOf("clips_tab", "clips_tab_icon", "reels_tab")
+    internal val homeTabs = setOf("feed_tab", "home_tab", "home_tab_icon")
+    private val redditSorts = setOf("hot", "new", "top", "rising", "best")
+    private val redditTabs = setOf("home", "popular", "watch")
+    private val reelPaths = setOf("reel", "reels")
+    private val youtubePlayers = setOf("reel_recycler", "reel_recycler_view", "reel_player_page_container",
+        "reel_watch_player", "shorts_player", "shorts_recycler_view")
+    private val excludedControls = listOf("comment", "reply", "message", "inbox", "chat", "composer")
 
     fun website(address: String?): String? {
         val text = address?.trim() ?: return null
@@ -15,12 +24,12 @@ internal object ShortFormFeeds {
         fun domain(name: String) = host == name || host.endsWith(".$name")
         return when {
             domain("youtube.com") && parts.firstOrNull() == "shorts" -> "YouTube Shorts"
-            domain("instagram.com") && parts.firstOrNull() in setOf("reel", "reels") -> "Instagram Reels"
+            domain("instagram.com") && parts.firstOrNull() in reelPaths -> "Instagram Reels"
             domain("instagram.com") && parts.isEmpty() -> "Instagram home feed"
             domain("reddit.com") && (parts.isEmpty() ||
-                parts.size == 1 && parts[0] in setOf("hot", "new", "top", "rising", "best") ||
+                parts.size == 1 && parts[0] in redditSorts ||
                 parts.size in 2..3 && parts[0] == "r" &&
-                (parts.size == 2 || parts[2] in setOf("hot", "new", "top", "rising", "best"))) -> "Reddit feed"
+                (parts.size == 2 || parts[2] in redditSorts)) -> "Reddit feed"
             else -> null
         }
     }
@@ -30,21 +39,20 @@ internal object ShortFormFeeds {
         if (ids.any { excludedControl(it) }) return null
         return when (pkg) {
             "com.google.android.youtube" -> if ("shorts" in selected || ids.any {
-                it in setOf("reel_recycler", "reel_recycler_view", "reel_player_page_container",
-                    "reel_watch_player", "shorts_player", "shorts_recycler_view")
+                it in youtubePlayers
             }) "YouTube Shorts" else null
             "com.instagram.android" -> when {
                 "reels" in selected || ids.any { it.startsWith("clips_viewer_") } -> "Instagram Reels"
                 "home" in selected && ids.any { it.startsWith("row_feed_") } -> "Instagram home feed"
                 else -> null
             }
-            "com.reddit.frontpage" -> if (selected.any { it in setOf("home", "popular", "watch") } &&
+            "com.reddit.frontpage" -> if (selected.any { it in redditTabs } &&
                 ids.any { it.contains("feed") || it.startsWith("post_") }) "Reddit feed" else null
             else -> null
         }
     }
 
-    fun excludedControl(id: String) = listOf("comment", "reply", "message", "inbox", "chat", "composer")
+    fun excludedControl(id: String) = excludedControls
         .any { id.contains(it) } && !id.contains("button") && !id.endsWith("_count") &&
         !id.endsWith("_icon") && !id.endsWith("_label")
 }

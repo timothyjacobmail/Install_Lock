@@ -2,6 +2,12 @@
     <string name="app_name">Install Lock</string>
     <string name="ui_back">Back</string>
     <string name="add_to_chrome_whitelist">Add to Chrome whitelist</string>
+    <string name="policy_support_short">Restricted by Install Lock. Open Install Lock > Why apps are locked, or tap its notification, for the active rules and recovery steps.</string>
+    <string name="policy_support_long">Install Lock is enforcing a restriction configured on this phone.\n\nOpen Install Lock > Why apps are locked, or tap the Install Lock notification, to see the active rules, waiting periods and recovery steps.\n\nAn app can have several active locks. A temporary app unlock does not override curfew, cooldowns, required accessibility or VPN protection, or website rules.\n\nAndroid may describe these Install Lock restrictions as work policy even on a personal phone.</string>
+    <string name="why_apps_locked">Why apps are locked</string>
+    <string name="lock_notification_title">Install Lock is active</string>
+    <string name="lock_notification_text">App or setting blocked? Tap to see the reasons.</string>
+    <string name="lock_policy_explanation">Android may label Install Lock restrictions as work policy. This page shows the active app locks and recovery steps.</string>
     <string name="browser_keyword_service_name">Install Lock browser and Google keyword filter</string>
     <string name="browser_keyword_service_description">Checks browser address bars against your ordered domain rules and manga/comics category watchdog. Reads visible browser webpages and Google app content to detect your blocked words. Watches scrolling on recognized YouTube Shorts, Instagram and Reddit feeds in apps and supported browsers. Warnings can lead to a 30-minute browsing, social-app and installation cooldown. Per-word and generic exceptions apply to keyword filtering. A blocked keyword match in Google opens a new-search screen; in browsers, tries to close the tab, otherwise returns Home. Processing stays on this device; inspected content is not stored or sent anywhere.</string>
 </resources>

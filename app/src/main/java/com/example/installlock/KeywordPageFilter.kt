@@ -22,11 +22,12 @@ internal class KeywordPageFilter(
     }.toSet())
 
     fun findBlock(text: String): String? {
-        if (genericWords.isNotEmpty() && generic.findMatch(text) != null) return null
-        if (rules.isEmpty()) return blocked.findMatch(text)
-        val hits = blocked.findMatches(text)
+        val normalized = KeywordMatcher.normalizeText(text)
+        if (genericWords.isNotEmpty() && generic.findNormalizedMatch(normalized) != null) return null
+        if (rules.isEmpty()) return blocked.findNormalizedMatch(normalized)
+        val hits = blocked.findNormalizedMatches(normalized)
         if (hits.isEmpty()) return null
-        val exceptionsOnPage = allowed.findMatches(text)
+        val exceptionsOnPage = allowed.findNormalizedMatches(normalized)
         return hits.firstOrNull { word -> rules[word].orEmpty().none { it in exceptionsOnPage } }
     }
 

@@ -8,8 +8,10 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 object Store {
-    internal fun domainRules(c: Context): List<DomainRule> = p(c).getString("domainRules", "").orEmpty()
+    private val domainRuleCache = ParsedValueCache<String, List<DomainRule>> { raw -> raw
         .lineSequence().mapNotNull { DomainRule.decode(it) }.distinctBy { it.id }.toList()
+    }
+    internal fun domainRules(c: Context): List<DomainRule> = domainRuleCache.get(p(c).getString("domainRules", "").orEmpty())
 
     private fun saveDomainRules(c: Context, rules: List<DomainRule>) {
         p(c).edit().putString("domainRules", rules.joinToString("\n") { it.encode() }).apply()
@@ -205,7 +207,7 @@ object Store {
 
     fun lockProtectedApps(c: Context) = synchronized(TaskPasswords) {
         p(c).edit().putLong("unlockedUntil", 0L).apply()
-        TaskPasswords.scopes(c).filter { it.kind == TaskKind.APP_UNLOCK }.forEach { TaskPasswords.vault(c).lock(it.app) }
+        TaskPasswords.vault(c).lockAll()
     }
 
     fun unlockApp(c: Context, pkg: String, minutes: Int, password: String): Boolean = synchronized(TaskPasswords) {
@@ -366,7 +368,11 @@ object Store {
             .sorted().map { BrowserKeyword(it, removals[it]) }
     }
 
-    fun browserKeywords(c: Context): Set<String> = browserKeywordEntries(c).map { it.word }.toSet()
+    @Synchronized
+    fun browserKeywords(c: Context): Set<String> {
+        applyDueKeywordRemovals(c)
+        return p(c).getStringSet("browserKeywords", DEFAULT_BROWSER_KEYWORDS)!!.toSet()
+    }
 
     fun genericKeywordExceptions(c: Context): Set<String> =
         p(c).getStringSet("genericKeywordExceptions", emptySet())!!

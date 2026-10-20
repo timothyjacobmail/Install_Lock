@@ -19,6 +19,27 @@ class WatchdogStoreTest {
     }
     @After fun cleanup() { prefs.edit().clear().commit() }
 
+    @Test fun cachedCatalogSeesAdditionAndPreferenceReplacementImmediately() {
+        val before = WatchdogStore.domains(context)
+        assertSame(before, WatchdogStore.domains(context))
+        assertTrue(WatchdogStore.addDomain(context, "fresh-catalog.example"))
+        assertTrue("fresh-catalog.example" in WatchdogStore.domains(context))
+        assertFalse("fresh-catalog.example" in before)
+        prefs.edit().remove("addedDomains").commit()
+        assertFalse("fresh-catalog.example" in WatchdogStore.domains(context))
+    }
+
+    @Test fun cachedStateCannotHideCooldownWrittenThroughPreferencesOrItsExpiry() {
+        assertEquals(0L, WatchdogStore.remaining(context))
+        val c = WatchdogStore.clock(context)
+        fun state(untilWall: Long, untilElapsed: Long) =
+            listOf(0, 0, 0, -1, 0, -1, 0, untilWall, untilElapsed, c.boot).joinToString("|")
+        prefs.edit().putString("state", state(c.wall + 60_000, c.elapsed + 60_000)).commit()
+        assertTrue(WatchdogStore.remaining(context) > 59_000)
+        prefs.edit().putString("state", state(c.wall - 1, c.elapsed - 1)).commit()
+        assertEquals(0L, WatchdogStore.remaining(context))
+    }
+
     @Test fun addedDomainsPersistAndCannotInjectPathsOrUnrelatedSuffixes() {
         assertTrue(WatchdogStore.addDomain(context, "https://new-manga.example/read/chapter"))
         assertTrue("new-manga.example" in WatchdogStore.domains(context))

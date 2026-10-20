@@ -4,6 +4,41 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TaskVaultTest {
+    @Test fun statusReadsNeedOnlyTheirOwnKeysAndSeeNewValuesImmediately() {
+        val values = mutableMapOf("task.ready" to "1", "task.APP_UNLOCK|com.example.app.until" to "2000",
+            "task.APP_UNLOCK|com.example.app.limit" to "15", "task.APP_UNLOCK|com.example.app.hash" to "present")
+        val vault = TaskVault(object : TaskData {
+            override fun read(): Map<String, String> = error("Status reads must not copy all credentials")
+            override fun get(key: String) = values[key]
+            override fun write(changes: Map<String, String>) = false
+        }, { 1000L })
+        assertEquals(2000L, vault.until("com.example.app"))
+        assertEquals(15, vault.limit("com.example.app"))
+        assertTrue(vault.has(TaskScope(TaskKind.APP_UNLOCK, "com.example.app")))
+        values["task.APP_UNLOCK|com.example.app.until"] = "0"
+        assertEquals(0L, vault.until("com.example.app"))
+        values["task.ready"] = "0"
+        values["task.APP_UNLOCK|com.example.app.until"] = "5000"
+        assertEquals(0L, vault.until("com.example.app"))
+    }
+
+    @Test fun lockAllEndsEveryAppSessionInOneWriteWithoutChangingCredentialsOrLimits() {
+        val values = mutableMapOf("task.ready" to "1",
+            "task.scopes" to "APP_UNLOCK|com.example.one\nAPP_UNLOCK|com.example.two\nWHITELIST_OFF|",
+            "task.APP_UNLOCK|com.example.one.until" to "9000", "task.APP_UNLOCK|com.example.two.until" to "8000",
+            "task.APP_UNLOCK|com.example.one.limit" to "15", "task.WHITELIST_OFF|.hash" to "secret")
+        val before = values.toMap()
+        var writes = 0
+        val vault = TaskVault(object : TaskData {
+            override fun read() = values.toMap()
+            override fun write(changes: Map<String, String>): Boolean { writes++; values.putAll(changes); return true }
+        })
+        assertTrue(vault.lockAll())
+        assertEquals(1, writes)
+        assertEquals(0L, vault.until("com.example.one"))
+        assertEquals(0L, vault.until("com.example.two"))
+        assertEquals(before.filterKeys { !it.endsWith(".until") }, values.filterKeys { !it.endsWith(".until") })
+    }
     @Test fun changingAPasswordCannotProbeAnotherTasksSecret() {
         val vault = TaskVault(Memory())
         install(vault, item(whitelist, "ChromeOnly1"), item(youtubeAccess, "YoutubePass1"))

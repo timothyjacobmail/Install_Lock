@@ -31,6 +31,7 @@ object Policy {
     /** One-time hardening, safe to call repeatedly. */
     fun apply(c: Context) {
         if (!isOwner(c)) return
+        updateSupportMessages(c)
         val dpm = dpm(c)
         val admin = admin(c)
         // Stop the clock being changed to cheat the timer
@@ -43,6 +44,24 @@ object Policy {
                 admin, c.packageName, Manifest.permission.POST_NOTIFICATIONS,
                 DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED
             )
+        }
+    }
+
+    /** Android owns the restriction dialog. Supply its supported admin explanation text. */
+    internal fun updateSupportMessages(c: Context) {
+        if (!isOwner(c)) return
+        try {
+            val manager = dpm(c)
+            val receiver = admin(c)
+            val shortMessage = c.getString(R.string.policy_support_short)
+            val longMessage = c.getString(R.string.policy_support_long)
+            if (manager.getShortSupportMessage(receiver)?.toString() != shortMessage)
+                manager.setShortSupportMessage(receiver, shortMessage)
+            if (manager.getLongSupportMessage(receiver)?.toString() != longMessage)
+                manager.setLongSupportMessage(receiver, longMessage)
+        } catch (e: RuntimeException) {
+            // Explanation text is optional; a failed update must never interrupt enforcement.
+            Log.w("InstallLock", "Could not update Android's restriction explanation", e)
         }
     }
 
@@ -73,7 +92,10 @@ object Policy {
         val pm = c.packageManager
         val now = System.currentTimeMillis()
         val cooldownRemaining = WatchdogStore.remaining(c)
-        val cooldownTargets = WatchdogStore.cooldownPackages(c)
+        val discoveredBrowsers = BrowserPackages.discover(c)
+        val browserTargets = discoveredBrowsers + BrowserPackages.GOOGLE_APP
+        val monitoredTargets = browserTargets + ShortFormFeeds.nativePackages
+        val cooldownTargets = monitoredTargets + "com.android.vending"
         val rapidCooldown = WatchdogStore.rapidCooldown(c)
         try { WatchdogStore.enforceInstallLock(c, cooldownRemaining > 0) }
         catch (e: Exception) { Log.w("InstallLock", "Could not reconcile cooldown install restriction; will retry", e) }
@@ -84,7 +106,7 @@ object Policy {
         val protectedApps = Store.protectedApps(c)
         val installed = pm.getInstalledPackages(0)
         val curfewTargets = CurfewStore.enroll(c, installed,
-            protectedApps + BrowserPackages.keywordTargets(c) + CURBOX_GUARDED, homePkg, now)
+            protectedApps + browserTargets + CURBOX_GUARDED, homePkg, now)
         val curfewUntil = CurfewRules.blockedUntil(now, CurfewStore.zone(), CurfewStore.appealedNight(c))
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
         val previousKeywordGuard = Store.keywordGuardPackages(c)
@@ -92,10 +114,12 @@ object Policy {
         val keywordFilterOn = Store.browserKeywordFilterEnabled(c)
         val domainRulesOn = Store.domainRules(c).isNotEmpty()
         val keywordBrowsers = if (!BrowserKeywordService.isReady(c))
-            WatchdogStore.monitoredPackages(c) + previousKeywordGuard else emptySet()
+            monitoredTargets + previousKeywordGuard else emptySet()
         val keywordReleaseRetries = mutableSetOf<String>()
         val googleVpnMissing = !DnsFilterService.isReady(c)
         val neverRules = Store.neverInstall(c)
+        val selectedCategories = Store.immediatePlayCategories(c)
+        val installWaitMs = timings.milliseconds(TimingOption.INSTALL_WAIT)
         val statuses = mutableListOf<AppLockStatus>()
 
         fun record(pkg: PackageInfo, info: ApplicationInfo, reasons: AppLockReasons, categoryExemption: String? = null) {
@@ -126,7 +150,7 @@ object Policy {
             val isSystem = info.flags and ApplicationInfo.FLAG_SYSTEM != 0
 
             // Apps that must never stay installed: suspend at once, then uninstall.
-            val neverRule = if (!isSystem)
+            val neverRule = if (!isSystem && neverRules.isNotEmpty())
                 blockedRule(neverRules, name, labelOf(pm, pkg, info)) else null
 
             val isProtected = name in protectedApps
@@ -143,9 +167,8 @@ object Policy {
                 continue
             }
 
-            val installWaitMs = timings.milliseconds(TimingOption.INSTALL_WAIT)
             val newInstall = PlayCategoryRules.installWaitUntil(isSystem, pkg.firstInstallTime, now, installWaitMs) != null
-            val categoryExemption = if (newInstall && neverRule == null) PlayCategoryLookup.exemption(c, pkg) else null
+            val categoryExemption = if (newInstall && neverRule == null) PlayCategoryLookup.exemption(c, pkg, selectedCategories) else null
             val reasons = AppLockReasons(
                 keywordServiceMissing = keywordPaused && keywordFilterOn && name !in ShortFormFeeds.nativePackages,
                 domainServiceMissing = keywordPaused && domainRulesOn && !keywordFilterOn && name !in ShortFormFeeds.nativePackages,

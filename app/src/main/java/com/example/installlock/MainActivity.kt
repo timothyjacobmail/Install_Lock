@@ -37,8 +37,10 @@ import java.util.concurrent.Future
 class MainActivity : AppCompatActivity() {
 
     companion object {
+        internal const val ACTION_LOCK_REASONS = "com.example.installlock.LOCK_REASONS"
         // Cleared when the app leaves the screen
         private var authed = false
+        internal fun openDashboardFromDelayedSecret() { authed = true }
         private val shareLinkExecutor = Executors.newSingleThreadExecutor()
         private val credentialExecutor = Executors.newSingleThreadExecutor()
     }
@@ -90,7 +92,8 @@ class MainActivity : AppCompatActivity() {
     private fun showLockReasons() {
         val statuses = Policy.lockStatuses(this)
         val views = mutableListOf<View>(
-            label("Why apps are locked", 22f),
+            label(getString(R.string.why_apps_locked), 22f),
+            label(getString(R.string.lock_policy_explanation)),
             label("Expand an app to see its lock reasons and recovery steps."),
             label("Checked at " + DateFormat.getTimeInstance().format(Date())),
             button("Refresh") { reopen() },
@@ -189,7 +192,7 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         readSharedSite(intent)
-        render()
+        if (statusUpdatesActive && !openNotificationScreen()) render()
     }
 
     @Suppress("OVERRIDE_DEPRECATION", "GestureBackNavigation")
@@ -199,11 +202,46 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        render()
+        statusUpdatesActive = true
+        if (!openNotificationScreen()) render()
     }
+
+    private fun openNotificationScreen(): Boolean {
+        if (intent.action != ACTION_LOCK_REASONS) return openDelayedNotification()
+        intent = Intent()
+        // This read-only screen is already available before login. It grants no password session.
+        goTo { showLockReasons() }
+        return true
+    }
+
+    private fun openDelayedNotification(): Boolean {
+        if (intent.action != "com.example.installlock.OPEN_DELAYED_SECRET") return false
+        val id = intent.getStringExtra("request_id").orEmpty()
+        intent = Intent() // Only the persisted, exact action is trusted; no authorization comes from extras.
+        val snapshot = DelayedSecrets.peek(this, id) ?: return false
+        if (!Policy.isOwner(this)) return false
+        fun existing(view: View): InlineSecretPanel? {
+            if (view is InlineSecretPanel && view.requestId == id) return view
+            if (view is ViewGroup) for (i in 0 until view.childCount) existing(view.getChildAt(i))?.let { return it }
+            return null
+        }
+        existing(window.decorView)?.let { it.open(snapshot); return true }
+        val msg = errorLabel()
+        val panel = inlineSecrets(msg, { snapshot }) {
+            if (snapshot.scope == DelayedTask.DASHBOARD) { authed = true; render() }
+            else msg.text = "Completed: ${snapshot.title}"
+        }
+        screen(label(snapshot.title, 22f), label("Only this saved task can be unlocked."), msg, panel,
+            button("Back") { render() })
+        panel.open()
+        return true
+    }
+
+    private var statusUpdatesActive = false
 
     override fun onStop() {
         super.onStop()
+        statusUpdatesActive = false
         shareLinkTask?.cancel(true)
         shareLinkTask = null
         credentialGeneration++
@@ -260,7 +298,9 @@ class MainActivity : AppCompatActivity() {
                 Policy.sweep(this)
             }
             if (removed.isNotEmpty()) {
-                withTaskPassword(TaskScope(TaskKind.UNINSTALL_REMOVE), "Remove selected uninstall protection") { password ->
+                withTaskPassword(TaskScope(TaskKind.UNINSTALL_REMOVE), "Remove selected uninstall protection",
+                    mapOf("remove" to removed.toList(), "add" to (chosen - selected).toList()),
+                    delayedTitle = "Remove uninstall protection from ${removed.joinToString()}") { password ->
                     TaskPasswords.run(this, TaskScope(TaskKind.UNINSTALL_REMOVE), password) { commit(); true }
                 }
             } else {
@@ -328,6 +368,10 @@ class MainActivity : AppCompatActivity() {
         val msg = errorLabel()
         val status = label(unlockStatus())
         val locks = Policy.lockStatuses(this)
+        val delayed = inlineSecrets(msg, { DelayedTask(DelayedTask.DASHBOARD, "Open the Install Lock dashboard") }) {
+            authed = true
+            render()
+        }
         fun waitText(ms: Long) = "Too many attempts. Try again in ${(ms + 59_999) / 60_000} min."
         screen(
             UiStyle.eyebrow(this, "DEVICE PROTECTION"),
@@ -336,6 +380,7 @@ class MainActivity : AppCompatActivity() {
             label("Open your dashboard", 20f),
             label("Enter your main password to open the dashboard."),
             pw, msg,
+            delayed,
             UiStyle.button(this, "Unlock", primary = true) {
                 val password = pw.text.toString()
                 if (password.isBlank()) {
@@ -354,6 +399,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }),
             UiStyle.eyebrow(this, "PROTECTION TOOLS"),
+            button("Delayed secrets") { delayed.open() },
             button("Why apps are locked") { goTo { showLockReasons() } },
             curfewActions(),
             watchdogActions(),
@@ -434,7 +480,7 @@ class MainActivity : AppCompatActivity() {
             button("Refresh") { refreshStatus(); Policy.sweep(this) }, button("Back") { back() })
         status.postDelayed(object : Runnable {
             override fun run() {
-                if (status.isAttachedToWindow && !isFinishing && !isDestroyed) {
+                if (statusUpdatesActive && status.isAttachedToWindow && !isFinishing && !isDestroyed) {
                     refreshStatus()
                     status.postDelayed(this, 1000)
                 }
@@ -521,7 +567,7 @@ class MainActivity : AppCompatActivity() {
         list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, rules)
         list.setOnItemClickListener { _, _, i, _ ->
             val rule = rules[i]
-            withTaskPassword(TaskScope(TaskKind.NEVER_REMOVE), "Remove never-install rule: $rule") { password ->
+            withTaskPassword(TaskScope(TaskKind.NEVER_REMOVE), "Remove never-install rule: $rule", mapOf("rule" to rule)) { password ->
                 TaskPasswords.run(this, TaskScope(TaskKind.NEVER_REMOVE), password) {
                     Store.setNeverInstall(this, Store.neverInstall(this) - rule)
                     true
@@ -669,7 +715,7 @@ class MainActivity : AppCompatActivity() {
         val msg = label("")
         val status = label("")
         fun updateStatus() {
-            if (!status.isAttachedToWindow) return
+            if (!statusUpdatesActive || !status.isAttachedToWindow) return
             status.text = if (DnsFilterService.isReady(this))
                 "Install Lock VPN: running. Other app locks and keyword protection still apply."
             else "Install Lock VPN: not running. Google remains locked until this VPN is running."
@@ -712,7 +758,7 @@ class MainActivity : AppCompatActivity() {
                 toast("Blocking $name")
                 reopen()
             } else {
-                withTaskPassword(TaskScope(TaskKind.DNS_UNBLOCK), "Unblock Google DNS domain: $name") { password ->
+                withTaskPassword(TaskScope(TaskKind.DNS_UNBLOCK), "Unblock Google DNS domain: $name", mapOf("remove" to hits.toList())) { password ->
                     TaskPasswords.run(this, TaskScope(TaskKind.DNS_UNBLOCK), password) {
                         Store.setBlockedDomains(this, Store.blockedDomains(this) - hits.toSet())
                         true
@@ -887,7 +933,7 @@ class MainActivity : AppCompatActivity() {
                     s == null -> msg.text = "That doesn't look like a specific site. Use something like example.com."
                     Store.sites(this).any { it.pattern == s } -> msg.text = "$s is already on the list."
                     else -> {
-                        withTaskPassword(TaskScope(TaskKind.WHITELIST_ADD), "Whitelist only $s") { password ->
+                        withTaskPassword(TaskScope(TaskKind.WHITELIST_ADD), "Whitelist only $s", mapOf("site" to s)) { password ->
                             TaskPasswords.run(this, TaskScope(TaskKind.WHITELIST_ADD), password) {
                                 Store.addSite(this, s).also { if (it) Policy.syncChrome(this) }
                             }
@@ -1013,7 +1059,8 @@ class MainActivity : AppCompatActivity() {
                         normalized == null -> msg.text = "Enter hostname text, a domain, or a suffix such as .org. Do not include a URL, path, or spaces."
                         target == null || target !in 1..rules.size + 1 -> msg.text = "Enter a position from 1 to ${rules.size + 1}."
                         rules.any { it.action == selectedAction && it.type == selectedType && it.value == normalized } -> msg.text = "This rule already exists. Change its position below."
-                        selectedAction == DomainAction.ALLOW -> withTaskPassword(TaskScope(TaskKind.DOMAIN_ALLOW), "Add Allow rule") { password ->
+                        selectedAction == DomainAction.ALLOW -> withTaskPassword(TaskScope(TaskKind.DOMAIN_ALLOW), "Allow ${selectedType.title}: $normalized at position $target",
+                            mapOf("type" to selectedType.name, "value" to normalized, "position" to target)) { password ->
                             Store.addDomainRule(this, selectedAction, selectedType, normalized, target, password)
                         }
                         else -> {
@@ -1028,7 +1075,8 @@ class MainActivity : AppCompatActivity() {
         )
         if (rules.isEmpty()) views.add(label("No domain rules yet."))
         rules.forEachIndexed { index, rule ->
-            fun moveTo(target: Int) = withTaskPassword(TaskScope(TaskKind.DOMAIN_MOVE), "Move rule to position $target") { password ->
+            fun moveTo(target: Int) = withTaskPassword(TaskScope(TaskKind.DOMAIN_MOVE), "Move ${rule.description} to position $target",
+                mapOf("id" to rule.id, "position" to target)) { password ->
                 Store.moveDomainRule(this, rule.id, target, password)
             }
             val controls = mutableListOf<View>(label(rule.description),
@@ -1049,7 +1097,7 @@ class MainActivity : AppCompatActivity() {
             if (index > 0) controls.add(button("Move up (task password)") { moveTo(index) })
             if (index < rules.lastIndex) controls.add(button("Move down (task password)") { moveTo(index + 2) })
             controls.add(button(if (rule.action == DomainAction.BLOCK) "Remove rule (task password)" else "Remove Allow rule") {
-                if (rule.action == DomainAction.BLOCK) withTaskPassword(TaskScope(TaskKind.DOMAIN_REMOVE), "Remove Block rule") { password ->
+                if (rule.action == DomainAction.BLOCK) withTaskPassword(TaskScope(TaskKind.DOMAIN_REMOVE), "Remove ${rule.description}", mapOf("id" to rule.id)) { password ->
                     Store.removeDomainRule(this, rule.id, password)
                 } else {
                     Store.removeDomainRule(this, rule.id)
@@ -1226,6 +1274,12 @@ class MainActivity : AppCompatActivity() {
         )
         if (TaskPasswords.ready(this)) {
             views.add(password)
+            views.add(inlineSecrets(msg, {
+                val word = KeywordMatcher.normalizeWord(allowed.text.toString())
+                if (word == null) { msg.text = "Enter a valid exception word first."; null }
+                else DelayedTask(TaskScope(TaskKind.PAGE_EXCEPTION),
+                    "Add generic page exception: $word", mapOf("word" to word))
+            }) { allowed.setText(""); password.setText(""); drawRules() })
             views.add(button("Add generic exception (task password)") {
                 val word = KeywordMatcher.normalizeWord(allowed.text.toString())
                 when {
@@ -1299,6 +1353,14 @@ class MainActivity : AppCompatActivity() {
         )
         if (TaskPasswords.ready(this)) {
             views.add(password)
+            views.add(inlineSecrets(msg, {
+                val blocked = words.getOrNull(selected.selectedItemPosition)
+                val word = KeywordMatcher.normalizeWord(allowed.text.toString())
+                if (blocked == null || word == null || word == blocked) {
+                    msg.text = "Choose a blocked word and a valid, different exception first."; null
+                } else DelayedTask(TaskScope(TaskKind.WORD_EXCEPTION),
+                    "Allow $blocked when $word appears on the page", mapOf("blocked" to blocked, "word" to word))
+            }) { allowed.setText(""); password.setText(""); drawRules() })
             views.add(button("Add exception (task password)") {
                 val blocked = words.getOrNull(selected.selectedItemPosition) ?: return@button
                 val exception = KeywordMatcher.normalizeWord(allowed.text.toString())
@@ -1336,8 +1398,9 @@ class MainActivity : AppCompatActivity() {
             inputType = InputType.TYPE_CLASS_NUMBER; setText(config[option].toString()); hint = option.title
         } }
         val presets = EditText(this).apply { setText(config.unlockPresets.joinToString(", ")); hint = "Unlock presets in minutes" }
+        val selectedCategories = Store.immediatePlayCategories(this)
         val boxes = PlayInstallCategory.entries.associateWith { category -> CheckBox(this).apply {
-            text = category.title; minHeight = dp(48); isChecked = category.storeId in Store.immediatePlayCategories(this@MainActivity)
+            text = category.title; minHeight = dp(48); isChecked = category.storeId in selectedCategories
         } }
         val msg = errorLabel()
         fun timingViews(options: List<TimingOption>) = options.flatMap { listOf(label("${it.title} (${it.unit})"), fields.getValue(it)) }.toTypedArray()
@@ -1351,7 +1414,13 @@ class MainActivity : AppCompatActivity() {
             val shortcut = shortcutValues?.filterNotNull()
             val validation = TimingConfig(TimingOption.entries.associateWith { changes[it] ?: config[it] }, shortcut ?: config.unlockPresets).validationError()
             if (validation != null) { msg.text = validation; return }
-            withTaskPassword(TaskScope(if (security) TaskKind.SECURITY else TaskKind.TIMING), if (security) "Save password security settings" else "Save timing settings") {
+            withTaskPassword(TaskScope(if (security) TaskKind.SECURITY else TaskKind.TIMING),
+                if (security) "Save password security settings" else "Save timing settings",
+                buildMap<String, Any> {
+                    put("changes", changes.mapKeys { it.key.name })
+                    shortcut?.let { put("presets", it) }
+                }, delayedTitle = "Save " + changes.entries.joinToString { "${it.key.title}: ${it.value} ${it.key.unit}" } +
+                    (shortcut?.let { "; unlock presets: ${it.joinToString()} minutes" } ?: "")) {
                 TaskSettings.save(this, changes, shortcut, security, it)
             }
         }
@@ -1363,7 +1432,11 @@ class MainActivity : AppCompatActivity() {
                 section("Game categories", "Choose game genres", *boxes.filterKeys { it.isGame }.values.toTypedArray()),
                 primaryButton("Save category choices") {
                     val selected = boxes.filterValues { it.isChecked }.keys.map { it.storeId }.toSet()
-                    withTaskPassword(TaskScope(TaskKind.CATEGORIES), "Save Play Store categories") { TaskSettings.categories(this, selected, it) }
+                    withTaskPassword(TaskScope(TaskKind.CATEGORIES), "Save Play Store categories",
+                        mapOf("categories" to selected.toList()), delayedTitle = "Set immediate-access categories: " +
+                            PlayInstallCategory.entries.filter { it.storeId in selected }.joinToString { it.displayName }.ifEmpty { "none" }) {
+                        TaskSettings.categories(this, selected, it)
+                    }
                 }),
             section("Durations and waiting periods", "Timing password only; app-specific limits also apply",
                 *timingViews(TimingOption.entries.filterNot { it in TaskSettings.security }),
@@ -1403,7 +1476,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun withTaskPassword(scope: TaskScope, title: String, operation: (String) -> Boolean) {
+    private fun inlineSecrets(msg: TextView, task: () -> DelayedTask?, success: () -> Unit): InlineSecretPanel =
+        InlineSecretPanel(this, task) { id, claim, done ->
+            if (credentialJob?.isDone == false) {
+                msg.text = "Please wait for the current operation."
+                done(false)
+            } else {
+                var completed = false
+                taskJob(msg, {
+                    try {
+                        if (android.os.SystemClock.elapsedRealtime() < claim.expiresElapsed) {
+                            val snapshot = DelayedSecrets.take(this, id)
+                            com.example.delayedsecrect.InlineSecrets(this).complete(id)
+                            completed = snapshot != null && Policy.isOwner(this) && snapshot.execute(this, claim.value)
+                            if (completed) Policy.sweep(this)
+                        }
+                    } catch (_: Exception) { completed = false }
+                    null
+                }) {
+                    done(completed)
+                    if (completed) success()
+                    else msg.text = "Could not unlock. The secret may be expired, incorrect for this task, or the task is locked out."
+                }
+            }
+        }
+
+    private fun withTaskPassword(scope: TaskScope, title: String, details: Map<String, Any> = emptyMap(),
+        delayedTitle: String = title, operation: (String) -> Boolean) {
         if (!TaskPasswords.ready(this)) { goTo { showTaskSetup() }; return }
         if (!TaskPasswords.has(this, scope)) {
             if (scope.kind.perApp) goTo { showNewAppPasswords(scope.app) }
@@ -1414,7 +1513,8 @@ class MainActivity : AppCompatActivity() {
             val password = passwordField("Password for ${taskName(scope)}")
             val msg = errorLabel()
             screen(label(title, 22f), label("Required task: ${taskName(scope)}. This authorizes only this operation."),
-                password, msg, primaryButton("Confirm this task") {
+                password, msg, inlineSecrets(msg, { DelayedTask(scope, delayedTitle, details) }) { back() },
+                primaryButton("Confirm this task") {
                     val entered = password.text.toString()
                     if (entered.isBlank()) msg.text = "Enter password"
                     else if (TaskPasswords.remaining(this, scope) > 0) msg.text = "This task is locked out. Try again in ${(TaskPasswords.remaining(this, scope) + 59_999) / 60_000} min."
@@ -1483,9 +1583,9 @@ class MainActivity : AppCompatActivity() {
             label("Each password works for one task. There is no master override or password reset using the main password. " +
                 "Changing a task password requires its current password. Sharing happens only if you explicitly allow matching passwords."),
             button("Temporary app access") { goTo { showAppAccess() } })
-        val scopes = (TaskPasswords.scopes(this) + TaskPasswords.required(this)).sortedBy { taskName(it) }
-        for (scope in scopes) {
-            if (TaskPasswords.has(this, scope)) views.add(section(taskName(scope), "Password configured",
+        val scopes = (TaskPasswords.scopes(this) + TaskPasswords.required(this)).map { it to taskName(it) }.sortedBy { it.second }
+        for ((scope, name) in scopes) {
+            if (TaskPasswords.has(this, scope)) views.add(section(name, "Password configured",
                 button("Change only this password") { goTo { showTaskPasswordEditor(scope) } }))
         }
         Store.protectedApps(this).filter { !TaskPasswords.has(this, TaskScope(TaskKind.APP_UNLOCK, it)) }.forEach { app ->
@@ -1593,7 +1693,8 @@ class MainActivity : AppCompatActivity() {
                 val cap = minOf(TaskPasswords.vault(this).limit(app), Store.timingConfig(this)[TimingOption.MAX_UNLOCK])
                 if (!TaskPasswords.has(this, TaskScope(TaskKind.APP_UNLOCK, app))) goTo { showNewAppPasswords(app) }
                 else if (duration == null || duration !in 1..cap) { minutes.error = "Enter 1 to $cap minutes." }
-                else withTaskPassword(TaskScope(TaskKind.APP_UNLOCK, app), "Unlock only ${taskName(TaskScope(TaskKind.APP_UNLOCK, app)).substringAfter(": ")}") {
+                else withTaskPassword(TaskScope(TaskKind.APP_UNLOCK, app), "Unlock only ${taskName(TaskScope(TaskKind.APP_UNLOCK, app)).substringAfter(": ")} for $duration minutes",
+                    mapOf("minutes" to duration)) {
                     Store.unlockApp(this, app, duration, it)
                 }
             }, button("Lock selected app now") { selected()?.let { TaskPasswords.lockApp(this, it); Policy.sweep(this); update() } },
@@ -1613,7 +1714,8 @@ class MainActivity : AppCompatActivity() {
             field, primaryButton("Save limit for this app") {
                 val minutes = field.text.toString().toIntOrNull()
                 if (minutes !in 1..10080) field.error = "Enter 1 to 10080 minutes."
-                else withTaskPassword(TaskScope(TaskKind.APP_LIMIT, app), "Change only this app's access limit") {
+                else withTaskPassword(TaskScope(TaskKind.APP_LIMIT, app), "Set ${taskName(TaskScope(TaskKind.APP_LIMIT, app))} to $minutes minutes",
+                    mapOf("minutes" to minutes!!)) {
                     TaskPasswords.setLimit(this, app, minutes!!, it)
                 }
             }, button("Back") { back() })

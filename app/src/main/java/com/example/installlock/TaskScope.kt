@@ -44,6 +44,7 @@ data class NewTaskPassword(val scope: TaskScope, val password: String, val limit
 
 internal interface TaskData {
     fun read(): Map<String, String>
+    fun get(key: String): String? = read()[key]
     fun write(changes: Map<String, String>): Boolean
 }
 
@@ -59,12 +60,12 @@ internal class TaskVault(private val data: TaskData, private val now: () -> Long
             Regex("[A-Za-z0-9_-]{32}").matches(password.removePrefix(generatedPrefix(scope)))
     }
     private fun prefix(scope: TaskScope) = "task.${scope.id}."
-    fun ready() = data.read()["task.ready"] == "1"
-    fun scopes() = data.read()["task.scopes"].orEmpty().lines().mapNotNull { TaskScope.decode(it) }.toSet()
-    fun has(scope: TaskScope) = data.read().containsKey(prefix(scope) + "hash")
-    fun remaining(scope: TaskScope) = ((data.read()[prefix(scope) + "lockout"]?.toLongOrNull() ?: 0L) - now()).coerceAtLeast(0)
-    fun limit(app: String) = data.read()[prefix(TaskScope(TaskKind.APP_UNLOCK, app)) + "limit"]?.toIntOrNull() ?: 0
-    fun until(app: String) = if (ready()) data.read()[prefix(TaskScope(TaskKind.APP_UNLOCK, app)) + "until"]?.toLongOrNull() ?: 0L else 0L
+    fun ready() = data.get("task.ready") == "1"
+    fun scopes() = data.get("task.scopes").orEmpty().lines().mapNotNull { TaskScope.decode(it) }.toSet()
+    fun has(scope: TaskScope) = data.get(prefix(scope) + "hash") != null
+    fun remaining(scope: TaskScope) = ((data.get(prefix(scope) + "lockout")?.toLongOrNull() ?: 0L) - now()).coerceAtLeast(0)
+    fun limit(app: String) = data.get(prefix(TaskScope(TaskKind.APP_UNLOCK, app)) + "limit")?.toIntOrNull() ?: 0
+    fun until(app: String) = if (ready()) data.get(prefix(TaskScope(TaskKind.APP_UNLOCK, app)) + "until")?.toLongOrNull() ?: 0L else 0L
     private fun hash(password: String, salt: ByteArray) = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
         .generateSecret(javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, 120_000, 256)).encoded
     private fun encoded(bytes: ByteArray) = java.util.Base64.getEncoder().encodeToString(bytes)
@@ -144,6 +145,8 @@ internal class TaskVault(private val data: TaskData, private val now: () -> Long
         return data.write(mapOf(key + "limit" to minutes.toString(), key + "until" to minOf(until(app), now() + minutes * 60_000L).toString()))
     }
     fun lock(app: String) = data.write(mapOf(prefix(TaskScope(TaskKind.APP_UNLOCK, app)) + "until" to "0"))
+    fun lockAll() = data.write(scopes().filter { it.kind == TaskKind.APP_UNLOCK }
+        .associate { prefix(it) + "until" to "0" })
     fun capAll(configuredMax: Int) {
         data.write(scopes().filter { it.kind == TaskKind.APP_UNLOCK }.associate {
             prefix(it) + "until" to minOf(until(it.app), now() + minOf(configuredMax, limit(it.app)) * 60_000L).toString()

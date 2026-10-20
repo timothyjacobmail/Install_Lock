@@ -5,6 +5,8 @@ import android.content.Context
 internal object TaskPasswords {
     private fun prefs(c: Context) = c.getSharedPreferences("install_lock", Context.MODE_PRIVATE)
     internal fun vault(c: Context) = TaskVault(object : TaskData {
+        override fun get(key: String): String? = try { prefs(c).getString(key, null) }
+            catch (_: ClassCastException) { null }
         override fun read() = prefs(c).all.filterKeys { it.startsWith("task.") }.mapNotNull { (key, value) ->
             (value as? String)?.let { key to it }
         }.toMap()

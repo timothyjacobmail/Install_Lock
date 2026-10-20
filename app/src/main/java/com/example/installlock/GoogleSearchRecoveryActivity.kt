@@ -148,6 +148,8 @@ class GoogleSearchRecoveryActivity : AppCompatActivity() {
         finish()
     }
 
+    // Back intentionally goes Home: the superclass would reveal the still-blocked Google results.
+    @android.annotation.SuppressLint("MissingSuperCall")
     @Suppress("OVERRIDE_DEPRECATION", "GestureBackNavigation")
     override fun onBackPressed() { goHome() }
 }
