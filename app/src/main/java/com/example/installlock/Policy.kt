@@ -86,18 +86,22 @@ object Policy {
 
     private fun reconcile(c: Context, collectStatus: Boolean, releaseTargets: Set<String> = emptySet()): List<AppLockStatus> {
         if (!isOwner(c)) return emptyList()
+        VerseAlarmVolume.sync(c)
         enforceNoUninstall(c)
         val dpm = dpm(c)
         val admin = admin(c)
         val pm = c.packageManager
         val now = System.currentTimeMillis()
         val cooldownRemaining = WatchdogStore.remaining(c)
+        val focusRemaining = FocusLockStore.remaining(c)
+        val focusTargets = FocusLockStore.targets(c)
+        val focusManaged = FocusLockStore.managed(c)
         val discoveredBrowsers = BrowserPackages.discover(c)
         val browserTargets = discoveredBrowsers + BrowserPackages.GOOGLE_APP
         val monitoredTargets = browserTargets + ShortFormFeeds.nativePackages
         val cooldownTargets = monitoredTargets + "com.android.vending"
         val rapidCooldown = WatchdogStore.rapidCooldown(c)
-        try { WatchdogStore.enforceInstallLock(c, cooldownRemaining > 0) }
+        try { WatchdogStore.enforceInstallLock(c, cooldownRemaining > 0 || focusRemaining > 0) }
         catch (e: Exception) { Log.w("InstallLock", "Could not reconcile cooldown install restriction; will retry", e) }
         val timings = Store.timingConfig(c)
         val homePkg = pm.resolveActivity(
@@ -105,8 +109,8 @@ object Policy {
         )?.activityInfo?.packageName
         val protectedApps = Store.protectedApps(c)
         val installed = pm.getInstalledPackages(0)
-        val curfewTargets = CurfewStore.enroll(c, installed,
-            protectedApps + browserTargets + CURBOX_GUARDED, homePkg, now)
+        val curfewTargets = CurfewStore.enroll(c, installed, homePkg, now)
+        val curfewManaged = CurfewStore.managed(c)
         val curfewUntil = CurfewRules.blockedUntil(now, CurfewStore.zone(), CurfewStore.appealedNight(c))
         val browsers = if (Store.chromeLock(c)) otherBrowsers(c) else emptySet()
         val previousKeywordGuard = Store.keywordGuardPackages(c)
@@ -160,8 +164,8 @@ object Policy {
             val isGoogle = name == BrowserPackages.GOOGLE_APP
             // Previously guarded system apps must also be processed so they can be resumed.
             if (isSystem && !isProtected && !isBrowser && !isGuarded &&
-                !keywordPaused && !isGoogle && name !in previousKeywordGuard && name !in releaseTargets && name !in curfewTargets &&
-                name !in cooldownTargets) {
+                !keywordPaused && !isGoogle && name !in previousKeywordGuard && name !in releaseTargets && name !in curfewManaged &&
+                name !in cooldownTargets && name !in focusManaged) {
                 // Read status without changing policy for unrelated system apps.
                 if (name == CHROME) record(pkg, info, AppLockReasons())
                 continue
@@ -181,6 +185,7 @@ object Policy {
                 neverInstallRule = neverRule,
                 googleVpnMissing = isGoogle && googleVpnMissing,
                 curfewUntil = curfewUntil.takeIf { name in curfewTargets },
+                focusUntil = (now + focusRemaining).takeIf { focusRemaining > 0 && name in focusTargets },
                 categoryCooldownUntil = (now + cooldownRemaining).takeIf { cooldownRemaining > 0 && name in cooldownTargets },
                 categoryServiceMissing = keywordPaused,
                 rapidScrollCooldown = rapidCooldown

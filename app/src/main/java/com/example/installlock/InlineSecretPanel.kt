@@ -17,8 +17,8 @@ import com.example.delayedsecrect.InlineSecretClaim
 import com.example.delayedsecrect.InlineSecrets
 import com.example.delayedsecrect.RevealState
 import com.example.delayedsecrect.CLAIM_WINDOW_MS
-import com.example.delayedsecrect.copySecretToClipboard
-import com.example.delayedsecrect.clearClipboardIfMatches
+import com.example.delayedsecrect.SecretClipboard
+import com.example.delayedsecrect.OverlayService
 
 /** Keeps the originating form alive. No secret or claim is saved in view/activity state. */
 internal class InlineSecretPanel(
@@ -51,12 +51,12 @@ internal class InlineSecretPanel(
     }
     private val unlockButton = UiStyle.button(host, "Unlock", primary = true) { performUnlock() }
     private val copy = UiStyle.button(host, "Copy password") { claim()?.let { revealed ->
-        copySecretToClipboard(host, revealed.value)
-        message.text = "Password copied. Clipboard clears in 5 seconds."
-        handler.postDelayed({ clearClipboardIfMatches(host.applicationContext, revealed.value) },
-            minOf(5000L, (revealed.expiresElapsed - SystemClock.elapsedRealtime()).coerceAtLeast(1)))
+        SecretClipboard.copyWithOptions(host, revealed.value) { message.text = it }
         refresh()
     } }
+    private val floating = UiStyle.button(host, "Floating password — enter in another app") {
+        requestId?.let { message.text = OverlayService.openForRequest(host, it) }
+    }
     private val show: com.google.android.material.button.MaterialButton = UiStyle.button(host, "Show password") {
         if (shownPassword.text.isNotEmpty()) hidePassword()
         else claim()?.let { revealed ->
@@ -89,6 +89,7 @@ internal class InlineSecretPanel(
         content.addView(message)
         content.addView(unlockButton)
         content.addView(copy)
+        content.addView(floating)
         content.addView(show)
         content.addView(shownPassword)
         content.addView(notifications)
@@ -184,6 +185,7 @@ internal class InlineSecretPanel(
         val ready = info?.state == RevealState.REVEALED
         unlockButton.isEnabled = ready && !busy
         copy.isEnabled = ready && !busy
+        floating.isEnabled = ready && !busy
         show.isEnabled = ready && !busy
         use.isEnabled = displayedChoices.isNotEmpty() && !busy
         notifications.visibility = if (android.os.Build.VERSION.SDK_INT >= 33 && host.checkSelfPermission(

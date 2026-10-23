@@ -3,8 +3,6 @@ package com.example.installlock
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
-import java.time.Instant
-import java.time.LocalDate
 import java.time.ZoneId
 
 object CurfewStore {
@@ -12,22 +10,28 @@ object CurfewStore {
     fun zone(): ZoneId = ZoneId.systemDefault()
     fun appealedNight(c: Context): String? = prefs(c).getString("appealedNight", null)
     fun targets(c: Context): Set<String> = prefs(c).getStringSet("targets", emptySet()).orEmpty().toSet()
+    /** Release bookkeeping only; old entries here are not curfew targets. */
+    fun managed(c: Context): Set<String> = prefs(c).getStringSet("managed", emptySet()).orEmpty().toSet()
 
     @Synchronized
-    fun enroll(c: Context, packages: List<PackageInfo>, defaults: Set<String>, home: String?, now: Long): Set<String> {
+    fun enroll(c: Context, packages: List<PackageInfo>, home: String?, now: Long): Set<String> {
         val p = prefs(c)
         val zone = zone()
-        val activation = p.getString("activationDay", null)?.let(LocalDate::parse)
-            ?: Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
         val enrolled = packages.filter { pkg ->
             CurfewRules.enrollInstall(pkg.firstInstallTime,
                 (pkg.applicationInfo?.flags ?: ApplicationInfo.FLAG_SYSTEM) and ApplicationInfo.FLAG_SYSTEM != 0,
-                activation, now, zone)
+                now, zone)
         }.map { it.packageName }
         val before = targets(c)
-        val after = (before + defaults + enrolled) - setOfNotNull(c.packageName, home)
-        if (!p.contains("activationDay") || before != after) {
-            check(p.edit().putString("activationDay", activation.toString()).putStringSet("targets", after).commit())
+        val excluded = setOfNotNull(c.packageName, home)
+        val after = (CurfewRules.permanentPackages + enrolled) - excluded
+        // Rebuild instead of accumulating. Keep former system targets visible to policy so
+        // migration and expiry can release them, including retries after Android rejects a release.
+        val previousManaged = managed(c)
+        val nextManaged = (previousManaged + before + after) - excluded
+        if (before != after || previousManaged != nextManaged || p.contains("activationDay")) {
+            check(p.edit().remove("activationDay").putStringSet("targets", after)
+                .putStringSet("managed", nextManaged).commit())
         }
         return after
     }

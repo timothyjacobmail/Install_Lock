@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import com.example.delayedsecrect.SecretClipboard
 
 class LockService : Service() {
 
@@ -42,8 +43,12 @@ class LockService : Service() {
     private fun scheduleBoundary(): Long {
         val now = System.currentTimeMillis()
         val cooldown = WatchdogStore.remaining(this)
+        val focus = FocusLockStore.remaining(this)
+        val taskDelay = ScheduledTasks.nextDelay(this)
         val next = minOf(CurfewRules.nextBoundary(now, CurfewStore.zone(), CurfewStore.appealedNight(this)),
-            if (cooldown > 0) now + cooldown else Long.MAX_VALUE)
+            if (cooldown > 0) now + cooldown else Long.MAX_VALUE,
+            if (focus > 0) now + focus else Long.MAX_VALUE,
+            taskDelay?.let { now + it.coerceAtLeast(1000L) } ?: Long.MAX_VALUE)
         if (scheduledBoundary != next) {
             val alarms = getSystemService(AlarmManager::class.java)
             alarms.cancel(boundaryAlarm)
@@ -57,7 +62,9 @@ class LockService : Service() {
 
     private val tick = object : Runnable {
         override fun run() {
+            SecretClipboard.reconcile()
             Store.applyDueKeywordRemovals(this@LockService)
+            ScheduledTasks.reconcileAsync(this@LockService)
             Policy.sweep(this@LockService)
             val untilBoundary = scheduleBoundary()
             handler.postDelayed(this, minOf(5000L, untilBoundary,
@@ -92,6 +99,7 @@ class LockService : Service() {
         } else {
             startForeground(1, n)
         }
+        SecretClipboard.initialize(this)
         registerReceiver(
             pkgReceiver,
             IntentFilter(Intent.ACTION_PACKAGE_ADDED).apply { addDataScheme("package") }
@@ -118,6 +126,7 @@ class LockService : Service() {
         // Includes opening Install Lock, boot, and sticky restarts after process death.
         Policy.updateSupportMessages(this)
         Policy.syncChrome(this, force = true)
+        ScheduledTasks.reschedule(this)
         // Re-schedule immediately when settings change; keep exactly one repeating tick.
         handler.removeCallbacks(tick)
         handler.post(tick)

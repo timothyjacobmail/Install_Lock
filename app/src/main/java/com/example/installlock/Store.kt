@@ -234,22 +234,30 @@ object Store {
         return p(c).getStringSet("sites", emptySet())!!.mapNotNull { raw ->
             val i = raw.indexOf('|')
             val t = if (i > 0) raw.substring(0, i).toLongOrNull() else null
-            if (t == null) null else Site(raw.substring(i + 1), t, config.siteActiveAt(t))
+            if (t == null) null else {
+                val pattern = raw.substring(i + 1)
+                Site(pattern, t, p(c).getLong("siteActiveAt.$pattern", config.siteActiveAt(t)))
+            }
         }.sortedBy { it.addedAt }
     }
 
-    fun addSite(c: Context, pattern: String): Boolean {
+    fun addSite(c: Context, pattern: String, waitMs: Long? = null): Boolean {
+        require(waitMs == null || waitMs >= 0)
         val set = p(c).getStringSet("sites", emptySet())!!.toMutableSet()
         if (set.any { it.substringAfter('|') == pattern }) return false
-        set.add("${System.currentTimeMillis()}|$pattern")
-        p(c).edit().putStringSet("sites", set).apply()
+        val now = System.currentTimeMillis()
+        set.add("$now|$pattern")
+        p(c).edit().putStringSet("sites", set).apply {
+            if (waitMs == null) remove("siteActiveAt.$pattern")
+            else putLong("siteActiveAt.$pattern", now + waitMs)
+        }.apply()
         return true
     }
 
     fun removeSite(c: Context, pattern: String) {
         val set = p(c).getStringSet("sites", emptySet())!!
             .filterNot { it.substringAfter('|') == pattern }.toSet()
-        p(c).edit().putStringSet("sites", set).apply()
+        p(c).edit().putStringSet("sites", set).remove("siteActiveAt.$pattern").apply()
     }
 
     /** Only sites whose configured wait is over. */

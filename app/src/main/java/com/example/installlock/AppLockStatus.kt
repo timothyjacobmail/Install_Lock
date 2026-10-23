@@ -17,13 +17,19 @@ data class AppLockReasons(
     val curfewUntil: Long? = null,
     val categoryCooldownUntil: Long? = null,
     val categoryServiceMissing: Boolean = false,
-    val rapidScrollCooldown: Boolean = false
+    val rapidScrollCooldown: Boolean = false,
+    val focusUntil: Long? = null
 ) {
     val shouldLock: Boolean get() = keywordServiceMissing || appLock || installWaitUntil != null ||
             otherBrowser || curboxMissing || neverInstallRule != null || googleVpnMissing || domainServiceMissing || curfewUntil != null ||
-            categoryCooldownUntil != null || categoryServiceMissing
+            categoryCooldownUntil != null || categoryServiceMissing || focusUntil != null
 
     fun descriptions(): List<String> = buildList {
+        focusUntil?.let {
+            val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
+            add("Focus lock is active until $end. It cannot be cancelled or shortened. " +
+                "Passwords, temporary app access and removing an app lock cannot bypass it.")
+        }
         categoryCooldownUntil?.let {
             val end = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it))
             add((if (rapidScrollCooldown) "Rapid-scrolling cooldown until $end: rapid feed scrolling continued after warnings for 10 seconds. "

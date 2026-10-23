@@ -8,6 +8,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -15,11 +16,9 @@ import kotlinx.coroutines.delay
 import androidx.activity.result.contract.ActivityResultContracts
 import android.os.Build
 import android.content.Intent
-import kotlinx.coroutines.launch
 import androidx.compose.ui.res.painterResource
 
 // Defaults per your spec — will become user-configurable in the Settings step
-const val CLIPBOARD_CLEAR_DELAY_MS = 5 * 1000L // 5 seconds
 const val DEFAULT_DELAY_MS = 1 * 60 * 1000L
 const val DEFAULT_VISIBLE_MS = 60 * 1000L
 const val EXTEND_MS = 5 * 60 * 1000L
@@ -76,11 +75,13 @@ fun SecretListScreen(
     refreshGeneration: Int = 0,
     onOpenSettings: () -> Unit
 ) {
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
     var secretPendingDelete by remember { mutableStateOf<Secret?>(null) }
     var secretEditingDelay by remember { mutableStateOf<Secret?>(null) }
     var secrets by remember { mutableStateOf(secretStore.getAll()) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
+    val searchTerms = searchQuery.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+    val visibleSecrets = secrets.filter { secret -> searchTerms.all { secret.name.contains(it, ignoreCase = true) } }
 
     // One RevealTimer per secret, created once and reused
     var delayMs by remember { mutableStateOf(settingsStore.getDelayMinutes() * 60_000L) }
@@ -130,7 +131,7 @@ fun SecretListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Delayed secrets") },
+                title = { Text("Delayed Secrets") },
                 actions = {
                     ImportSecretListButton(secretStore, settingsStore) { secrets = secretStore.getAll() }
                     IconButton(onClick = onOpenSettings) {
@@ -146,6 +147,20 @@ fun SecretListScreen(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                label = { Text("Search secrets") },
+                placeholder = { Text("Search by name") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) TextButton(onClick = { searchQuery = "" }) { Text("Clear") }
+                }
+            )
+            if (secrets.isNotEmpty() && visibleSecrets.isEmpty()) {
+                Text("No secrets match your search.", Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
             if (secrets.isEmpty()) {
                 Card(Modifier.fillMaxWidth().padding(16.dp)) {
                     Text("Add a secret with +, or import your existing secret-list file. " +
@@ -174,7 +189,7 @@ fun SecretListScreen(
                     .weight(1f)
                     .padding(16.dp)
             ) {
-                items(secrets, key = { it.id }) { secret ->
+                items(visibleSecrets, key = { it.id }) { secret ->
                 val linkedRequest = activeLinks[secret.id]
                 val timer = if (linkedRequest != null) linkedRequests.timer(secret) else timers[secret.id]!!
                     timer.delayMillis = secret.delayMinutes?.let { it * 60_000L } ?: delayMs
@@ -186,12 +201,7 @@ fun SecretListScreen(
                         showSecretReadyNotification(context, secret.name, secret.id.hashCode())
 
                         if (hasOverlayPermission(context)) {
-                            val serviceIntent = Intent(context, OverlayService::class.java).apply {
-                                putExtra(OverlayService.EXTRA_SECRET_NAME, secret.name)
-                                putExtra(OverlayService.EXTRA_SECRET_VALUE, secret.value)
-                                putExtra(OverlayService.EXTRA_SECRET_ID, secret.id)
-                                putExtra(OverlayService.EXTRA_HIDE_AT_ELAPSED_MS, info.hideAtElapsedMs)
-                            }
+                            val serviceIntent = OverlayService.secretIntent(context, secret.id, entryOnly = false)
                             context.startForegroundService(serviceIntent)
                         }
                     }
@@ -278,18 +288,20 @@ fun SecretListScreen(
                                     Button(onClick = { context.startActivity(linkedRequests.openIntent(context, linkedRequest.id)) }) {
                                         Text("Unlock in Install Lock?")
                                     }
+                                    OutlinedButton(onClick = {
+                                        android.widget.Toast.makeText(context, OverlayService.openForRequest(context, linkedRequest.id), android.widget.Toast.LENGTH_LONG).show()
+                                    }) { Text("Floating password") }
                                 } else {
                                 val remainingMs = info.hideAtElapsedMs - android.os.SystemClock.elapsedRealtime()
                                 Text("SECRET: ${secret.value}", style = MaterialTheme.typography.bodyLarge)
                                 Text("Hides in ${formatDuration(remainingMs)}")
                                 Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedButton(onClick = {
+                                    android.widget.Toast.makeText(context, OverlayService.openForSecret(context, secret.id), android.widget.Toast.LENGTH_LONG).show()
+                                }) { Text("Floating password") }
                                 Row {
                                     OutlinedButton(onClick = {
-                                        copySecretToClipboard(context, secret.value)
-                                        scope.launch {
-                                            kotlinx.coroutines.delay(CLIPBOARD_CLEAR_DELAY_MS)
-                                            clearClipboardIfMatches(context, secret.value)
-                                        }
+                                        SecretClipboard.copyWithOptions(context, secret.value)
                                     }) {
                                         Text("Copy")
                                     }

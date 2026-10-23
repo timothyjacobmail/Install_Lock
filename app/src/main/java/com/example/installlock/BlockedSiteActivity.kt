@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.view.WindowInsets
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.window.OnBackInvokedDispatcher
@@ -57,6 +59,12 @@ class BlockedSiteActivity : AppCompatActivity() {
 
     private fun render() {
         val site = requestSite(intent.getStringExtra(SITE).orEmpty())
+        val address = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            hint = "reddit.com/r/mechanicalEngineering/"
+            setText(site)
+            setSelection(text.length)
+        }
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val padding = UiStyle.dp(this@BlockedSiteActivity, 24)
@@ -65,13 +73,20 @@ class BlockedSiteActivity : AppCompatActivity() {
             addView(UiStyle.label(this@BlockedSiteActivity, "Website blocked", 26f))
             addView(UiStyle.card(this@BlockedSiteActivity,
                 UiStyle.label(this@BlockedSiteActivity, "This page is outside your active Chrome whitelist."),
-                UiStyle.label(this@BlockedSiteActivity, site.ifEmpty { "Website address unavailable" }, 20f),
+                UiStyle.label(this@BlockedSiteActivity, "Website or path to allow", 20f),
+                address,
                 UiStyle.label(this@BlockedSiteActivity,
                     "You can request this site here without opening Chrome's Share menu. " +
+                        "If only the domain appears, enter or paste the full path above. " +
                         "Choose a path or the whole domain on the next screen. " +
                         "The usual whitelist password and waiting period still apply. Other locks also remain active."),
                 UiStyle.button(this@BlockedSiteActivity, "Whitelist this site", primary = true) {
-                    startActivity(whitelistIntent(this@BlockedSiteActivity, site))
+                    val selected = address.text.toString()
+                    if (requestSite(selected).isEmpty()) {
+                        address.error = "Enter a website address or path."
+                        return@button
+                    }
+                    startActivity(whitelistIntent(this@BlockedSiteActivity, selected))
                     finish()
                 }
             ), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = padding })

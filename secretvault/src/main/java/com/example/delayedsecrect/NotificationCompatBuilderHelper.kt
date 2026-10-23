@@ -8,8 +8,10 @@ object NotificationCompatBuilderHelper {
     fun build(context: Context): Notification {
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-            .setContentTitle("Secret visible")
-            .setContentText("Tap the floating box to view it")
+            .setContentTitle("Floating password")
+            .setContentText("Tap a password field, then use Enter password in the floating window")
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

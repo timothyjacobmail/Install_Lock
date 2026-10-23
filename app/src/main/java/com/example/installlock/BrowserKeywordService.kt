@@ -185,7 +185,9 @@ class BrowserKeywordService : AccessibilityService() {
                     Store.extraLockedSites(this).map { it.domain }.toSet())
                 val blocked = address?.let { chromeNavigationCache.get(config).block(it) }
                 if (address != null && blocked != null) {
-                    if (blocked == ChromeNavigationBlock.WHITELIST) recoverBlockedSite(address)
+                    if (blocked == ChromeNavigationBlock.WHITELIST) {
+                        if (!expandChromeCustomTab(root, address)) recoverBlockedSite(address)
+                    }
                     else closeTabOrLeave(root, browser, "This domain is in your extra locked sites")
                     return
                 }
@@ -309,13 +311,14 @@ class BrowserKeywordService : AccessibilityService() {
     }
 
     /** Native browser controls only: a page cannot impersonate a close-tab menu item. */
-    private fun findNative(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+    private fun findNative(root: AccessibilityNodeInfo, includeEditable: Boolean = false,
+                           predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
         var visited = 0
         fun walk(node: AccessibilityNodeInfo, depth: Int): AccessibilityNodeInfo? {
             if (depth > 64 || ++visited > 2000) return null
             if (node.className?.toString() == "android.webkit.WebView" ||
                 node.className?.toString()?.endsWith("GeckoView") == true) return null
-            if (node.isEditable || node.isPassword) return null
+            if (node.isPassword || node.isEditable && !includeEditable) return null
             if (node.isVisibleToUser && node.isEnabled && predicate(node)) return AccessibilityNodeInfo.obtain(node)
             for (i in 0 until node.childCount) {
                 val child = node.getChild(i) ?: continue
@@ -375,6 +378,69 @@ class BrowserKeywordService : AccessibilityService() {
         if (depth >= 2) return false
         val parent = node.parent ?: return false
         return try { clickMenuItem(parent, depth + 1) } finally { parent.recycle() }
+    }
+
+    /** Promote Google's embedded Chrome tab so its native URL includes the requested path.
+     * Never infer that path from a page title, search-result breadcrumb, or page link. */
+    private fun expandChromeCustomTab(root: AccessibilityNodeInfo, address: String): Boolean {
+        val url = findNative(root) {
+            it.packageName?.toString() == Policy.CHROME &&
+                ChromeTabRecovery.needsFullTab(it.viewIdResourceName, it.isEditable, it.isFocused, it.text?.toString())
+        } ?: return false
+        url.recycle()
+        val menu = findNative(root) {
+            it.packageName?.toString() == Policy.CHROME &&
+                it.viewIdResourceName == "${Policy.CHROME}:id/menu_button"
+        } ?: return false
+        val opened = try { menu.performAction(AccessibilityNodeInfo.ACTION_CLICK) } finally { menu.recycle() }
+        if (!opened) return false
+        handlingMatch = true
+        handler.postDelayed({ finishChromeTabHandoff(address, openedTab = false, attempt = 0) }, 150)
+        return true
+    }
+
+    private fun finishChromeTabHandoff(address: String, openedTab: Boolean, attempt: Int) {
+        val root = rootInActiveWindow
+        try {
+            // Do not act on another app if the user switches away during the handoff.
+            if (root == null || root.packageName?.toString() != Policy.CHROME) {
+                handlingMatch = false
+                scheduleScan(500)
+                return
+            }
+            if (!openedTab) {
+                val open = findNative(root) {
+                    ChromeTabRecovery.isOpenInChrome(it.packageName?.toString(), it.viewIdResourceName, it.text?.toString())
+                }
+                val clicked = try { open != null && clickMenuItem(open) } finally { open?.recycle() }
+                if (clicked) {
+                    handler.postDelayed({ finishChromeTabHandoff(address, openedTab = true, attempt = 0) }, 150)
+                    return
+                }
+            } else {
+                // A normal tab has an editable native URL bar even while it is unfocused.
+                // Re-run every guard against that committed URL, including extra site locks.
+                val fullTab = findNative(root, includeEditable = true) {
+                    it.packageName?.toString() == Policy.CHROME && it.isEditable && !it.isFocused &&
+                        it.viewIdResourceName == "${Policy.CHROME}:id/url_bar" &&
+                        DomainRules.hostFromAddress(it.text?.toString().orEmpty()) != null
+                }
+                if (fullTab != null) {
+                    fullTab.recycle()
+                    handlingMatch = false
+                    scheduleScan(0)
+                    return
+                }
+            }
+            if (attempt < 5) {
+                handler.postDelayed({ finishChromeTabHandoff(address, openedTab, attempt + 1) }, 150)
+                return
+            }
+            // Never keep the guard suspended when Chrome changes its menu or fails to open.
+            recoverBlockedSite(browserAddress(root, Policy.CHROME, visibleOnly = false) ?: address)
+        } catch (_: RuntimeException) {
+            recoverBlockedSite(address)
+        } finally { root?.recycle() }
     }
 
     private fun recoverBlockedSite(address: String) {

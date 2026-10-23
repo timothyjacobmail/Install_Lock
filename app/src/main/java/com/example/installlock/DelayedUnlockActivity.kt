@@ -63,7 +63,6 @@ class DelayedUnlockActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isDestroyed) return@runOnUiThread
                 if (success && task.scope == DelayedTask.DASHBOARD) {
-                    MainActivity.openDashboardFromDelayedSecret()
                     startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP))
                     finish()
                 } else {

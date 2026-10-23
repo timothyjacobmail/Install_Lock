@@ -21,7 +21,8 @@ internal data class DelayedTask(val scope: String, val title: String, val detail
             TaskKind.APP_LIMIT -> TaskPasswords.setLimit(c, task.app, d.getInt("minutes"), password)
             TaskKind.APP_REMOVE -> Store.removeAppLock(c, task.app, password).also { if (it) Policy.release(c, listOf(task.app)) }
             TaskKind.WHITELIST_OFF -> Policy.setChromeLock(c, false, password)
-            TaskKind.WHITELIST_ADD -> run { Store.addSite(c, d.getString("site")).also { if (it) Policy.syncChrome(c) } }
+            // This path has already waited for its saved password; never start a second site timer.
+            TaskKind.WHITELIST_ADD -> run { Store.addSite(c, d.getString("site"), waitMs = 0).also { if (it) Policy.syncChrome(c) } }
             TaskKind.KEYWORD_OFF -> Store.disableBrowserKeywordFilter(c, password)
             TaskKind.VPN_OFF -> Policy.disableGoogleFilter(c, password)?.startsWith("Error:") == false
             TaskKind.SCREENSHOTS_ALLOW -> Policy.setScreenCaptureBlocked(c, false, password)?.startsWith("Error:") == false

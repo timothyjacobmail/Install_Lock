@@ -6,6 +6,17 @@ import java.time.ZoneId
 
 /** Calendar nights, rather than a duration since launch: survives midnight, restarts and DST. */
 object CurfewRules {
+    // YouTube Whitelist has separate release and debug package IDs.
+    val permanentPackages: Set<String> = setOf(
+        "com.google.android.youtube",
+        "io.github.degipe.youtubewhitelist",
+        "io.github.degipe.youtubewhitelist.debug",
+        "com.android.chrome",
+        "com.android.vending",
+        "com.google.android.googlequicksearchbox",
+        "com.vivo.browser"
+    )
+
     fun night(now: Long, zone: ZoneId): LocalDate {
         val local = Instant.ofEpochMilli(now).atZone(zone)
         return if (local.hour < 4) local.toLocalDate().minusDays(1) else local.toLocalDate()
@@ -36,6 +47,7 @@ object CurfewRules {
             start(date.plusDays(1), zone)).filter { it > now }.min()
     }
 
-    fun enrollInstall(firstInstall: Long, system: Boolean, activatedOn: LocalDate, now: Long, zone: ZoneId): Boolean =
-        !system && firstInstall in 1..now && !Instant.ofEpochMilli(firstInstall).atZone(zone).toLocalDate().isBefore(activatedOn)
+    /** Downloads belong to one curfew night, including its after-midnight portion, and expire at 4 am. */
+    fun enrollInstall(firstInstall: Long, system: Boolean, now: Long, zone: ZoneId): Boolean =
+        !system && firstInstall in 1..now && night(firstInstall, zone) == night(now, zone)
 }

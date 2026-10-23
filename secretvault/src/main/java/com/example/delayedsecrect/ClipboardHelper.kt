@@ -1,20 +1,20 @@
 package com.example.delayedsecrect
 
 import android.content.ClipData
-import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Build
 import android.os.PersistableBundle
 
-fun copySecretToClipboard(context: Context, value: String) {
+internal const val SECRET_CLIP_TOKEN = "com.example.installlock.SECRET_CLIP_TOKEN"
+
+fun copySecretToClipboard(context: Context, value: String, token: String? = null) {
     val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     val clip = ClipData.newPlainText("secret", value)
 
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        clip.description.extras = PersistableBundle().apply {
-            putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
-        }
+    clip.description.extras = PersistableBundle().apply {
+        // The literal key also flags sensitive clips on Android versions before API 33.
+        putBoolean("android.content.extra.IS_SENSITIVE", true)
+        if (token != null) putString(SECRET_CLIP_TOKEN, token)
     }
 
     clipboard.setPrimaryClip(clip)
@@ -25,6 +25,6 @@ fun clearClipboardIfMatches(context: Context, value: String) {
     val current = clipboard.primaryClip
     val currentText = current?.getItemAt(0)?.text?.toString()
     if (currentText == value) {
-        clipboard.setPrimaryClip(ClipData.newPlainText("", ""))
+        clipboard.clearPrimaryClip()
     }
 }

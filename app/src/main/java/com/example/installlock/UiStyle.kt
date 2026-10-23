@@ -76,6 +76,18 @@ internal object UiStyle {
             setTextColor(ColorStateList(states, intArrayOf(ColorUtils.setAlphaComponent(ink, 100), ink)))
             elevation = 0f
             stateListAnimator = null
+            val buttonIcon = when {
+                text.contains("delayed secrets", ignoreCase = true) -> R.drawable.ic_il_secret
+                text == "Verse wake-up alarm" -> R.drawable.ic_il_alarm
+                else -> null
+            }
+            if (buttonIcon != null) {
+                setIconResource(buttonIcon)
+                iconTint = textColors
+                iconSize = dp(context, 24)
+                iconPadding = dp(context, 10)
+                iconGravity = MaterialButton.ICON_GRAVITY_TEXT_START
+            }
             setOnClickListener { onClick() }
         }
 
@@ -95,6 +107,8 @@ internal object UiStyle {
     }
 
     fun sectionIcon(title: String): Int = when {
+        title.contains("curfew", true) -> R.drawable.ic_il_moon_stars
+        title.contains("delayed secrets", true) -> R.drawable.ic_il_secret
         title.contains("Browser", true) || title.contains("website", true) || title.contains("domain", true) ||
                 title.contains("keyword", true) || title.contains("Blocked words", true) || title.contains("page", true) -> R.drawable.ic_il_globe
         title.contains("app", true) || title.contains("categor", true) || title.contains("Play Store", true) -> R.drawable.ic_il_apps

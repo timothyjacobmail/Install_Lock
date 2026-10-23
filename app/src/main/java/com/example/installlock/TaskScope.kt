@@ -78,6 +78,9 @@ internal class TaskVault(private val data: TaskData, private val now: () -> Long
         java.security.MessageDigest.isEqual(expected, hash(password, salt))
         } catch (_: IllegalArgumentException) { false }
     }
+    /** Match local vault entries without counting unrelated saved secrets as failed attempts. */
+    fun matchesStoredSecret(scope: TaskScope, password: String): Boolean =
+        ready() && password.isNotBlank() && has(scope) && matches(scope, password)
     private fun record(item: NewTaskPassword): Map<String, String> {
         val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
         val key = prefix(item.scope)

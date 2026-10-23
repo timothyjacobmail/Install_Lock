@@ -60,14 +60,26 @@ class CurfewRulesTest {
         assertNull(CurfewRules.blockedUntil(end, newYork, null))
     }
 
-    @Test fun enrollsSameDayEarlierDownloadsAndFutureDaysButNotOldInstallsOrSystemApps() {
-        val activation = LocalDate.parse(date)
+    @Test fun downloadsBelongOnlyToTheirCurfewNightAndExpireAt4am() {
         val now = time("2026-10-20T22:00:00")
-        assertTrue(CurfewRules.enrollInstall(time("2026-10-20T00:00:00"), false, activation, now, zone))
-        assertFalse(CurfewRules.enrollInstall(time("2026-10-19T23:59:59"), false, activation, now, zone))
-        assertFalse(CurfewRules.enrollInstall(time("2026-10-20T12:00:00"), true, activation, now, zone))
-        assertFalse(CurfewRules.enrollInstall(now + 1, false, activation, now, zone))
-        assertTrue(CurfewRules.enrollInstall(time("2026-10-21T01:00:00"), false, activation, time("2026-10-21T02:00:00"), zone))
+        val installed = time("2026-10-20T12:00:00")
+        assertTrue(CurfewRules.enrollInstall(installed, false, now, zone))
+        assertFalse(CurfewRules.enrollInstall(time("2026-10-19T23:59:59"), false, now, zone))
+        assertFalse(CurfewRules.enrollInstall(installed, true, now, zone))
+        assertFalse(CurfewRules.enrollInstall(now + 1, false, now, zone))
+        assertFalse(CurfewRules.enrollInstall(0, false, now, zone))
+        assertTrue(CurfewRules.enrollInstall(installed, false, time("2026-10-21T03:59:59"), zone))
+        assertFalse(CurfewRules.enrollInstall(installed, false, time("2026-10-21T04:00:00"), zone))
+        assertFalse(CurfewRules.enrollInstall(installed, false, time("2026-10-21T23:00:00"), zone))
+    }
+
+    @Test fun downloadsDuringAfterMidnightCurfewExpireThatMorning() {
+        val installed = time("2026-10-21T01:00:00")
+        assertTrue(CurfewRules.enrollInstall(installed, false, time("2026-10-21T02:00:00"), zone))
+        assertFalse(CurfewRules.enrollInstall(installed, false, time("2026-10-21T04:00:00"), zone))
+        assertFalse(CurfewRules.enrollInstall(installed, false, time("2026-10-21T23:00:00"), zone))
+        val nextNightDownload = time("2026-10-21T04:00:00")
+        assertTrue(CurfewRules.enrollInstall(nextNightDownload, false, time("2026-10-21T23:00:00"), zone))
     }
 
     @Test fun curfewOverridesOtherwiseUnlockedAppsAndCategoryExemptions() {

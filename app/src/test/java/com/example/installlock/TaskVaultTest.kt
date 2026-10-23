@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TaskVaultTest {
+    @Test fun matchingSavedSecretsDoesNotConsumeAttemptsOrGrantTaskAccess() {
+        val data = Memory()
+        val vault = TaskVault(data)
+        val scope = TaskScope(TaskKind.WHITELIST_ADD)
+        assertNull(vault.install(listOf(NewTaskPassword(scope, "SavedPassword1")), false))
+        val before = data.values.toMap()
+        repeat(10) { assertFalse(vault.matchesStoredSecret(scope, "UnrelatedSecret1")) }
+        assertTrue(vault.matchesStoredSecret(scope, "SavedPassword1"))
+        assertFalse(vault.matchesStoredSecret(TaskScope(TaskKind.CATEGORIES), "SavedPassword1"))
+        assertEquals(before, data.values)
+        assertFalse(vault.check(scope, ""))
+    }
     @Test fun statusReadsNeedOnlyTheirOwnKeysAndSeeNewValuesImmediately() {
         val values = mutableMapOf("task.ready" to "1", "task.APP_UNLOCK|com.example.app.until" to "2000",
             "task.APP_UNLOCK|com.example.app.limit" to "15", "task.APP_UNLOCK|com.example.app.hash" to "present")

@@ -34,7 +34,6 @@ internal object TaskPasswords {
 
     @Synchronized fun migrate(c: Context, legacy: Map<Store.Pw, String>, items: List<NewTaskPassword>, share: Boolean): String? {
         if (ready(c)) return "Task passwords have already been set up."
-        if (!Store.hasPassword(c)) return "Set the main dashboard password first."
         if (items.map { it.scope }.toSet() != required(c).toSet()) return "The protected app list changed. Reopen setup and try again."
         for (role in Store.Pw.entries.filter { Store.hasPassword(c, it) }) {
             if (!Store.checkPassword(c, legacy[role].orEmpty(), role)) return "Wrong current ${role.name.lowercase().replace('_', '-')} password, or that password is locked out."

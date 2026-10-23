@@ -37,6 +37,16 @@ class BlockedSiteRecoveryTest {
         assertEquals("localhost:40715/callback", share.getStringExtra(Intent.EXTRA_TEXT))
     }
 
+    @Test fun fullRedditPathSurvivesRecoveryAndTheWhitelistForm() {
+        val recovery = BlockedSiteActivity.openIntent(context,
+            "https://www.reddit.com/r/mechanicalEngineering/comments/abc/title/?utm_source=google#comments")
+        val share = BlockedSiteActivity.whitelistIntent(context, recovery.getStringExtra("blocked_site")!!)
+        val choices = SharedSite.whitelistOptions(share.getStringExtra(Intent.EXTRA_TEXT))
+        assertEquals("reddit.com/r/mechanicalEngineering/comments/abc/title/", choices.first())
+        assertTrue(choices.contains("reddit.com/r/mechanicalEngineering/"))
+        assertEquals("reddit.com", choices.last())
+    }
+
     @Test fun googleShortLinkStillReachesTheExistingResolver() {
         val share = BlockedSiteActivity.whitelistIntent(context, "https://share.google/exampleToken?tracking=123")
         assertEquals("https://share.google/exampleToken", SharedSite.shortLinkFromText(share.getStringExtra(Intent.EXTRA_TEXT)))

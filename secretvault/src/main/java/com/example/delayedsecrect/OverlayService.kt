@@ -23,6 +23,8 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import android.widget.Toast
+import androidx.compose.ui.text.style.TextOverflow
 
 class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 
@@ -33,22 +35,47 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 
     private lateinit var windowManager: WindowManager
     private var overlayView: ComposeView? = null
-    private val handler = Handler(Looper.getMainLooper())
     private var layoutParams: WindowManager.LayoutParams? = null
 
     companion object {
-        const val EXTRA_SECRET_NAME = "secret_name"
-        const val EXTRA_SECRET_VALUE = "secret_value"
         const val EXTRA_SECRET_ID = "secret_id"
-        const val EXTRA_HIDE_AT_ELAPSED_MS = "hide_at_elapsed_ms"
+        private const val EXTRA_REQUEST_ID = "inline_request_id"
+        private const val EXTRA_ENTRY_ONLY = "entry_only"
         const val ACTION_STOP = "action_stop"
+
+        fun secretIntent(context: Context, secretId: String, entryOnly: Boolean = true) =
+            Intent(context, OverlayService::class.java).putExtra(EXTRA_SECRET_ID, secretId)
+                .putExtra(EXTRA_ENTRY_ONLY, entryOnly)
+
+        fun openForRequest(context: Context, requestId: String): String = open(context,
+            Intent(context, OverlayService::class.java).putExtra(EXTRA_REQUEST_ID, requestId))
+
+        fun openForSecret(context: Context, secretId: String): String = open(context, secretIntent(context, secretId))
+
+        private fun open(context: Context, intent: Intent): String {
+            if (!PasswordFieldEntry.available) return "Turn on Install Lock accessibility, then try Floating password again."
+            if (!hasOverlayPermission(context)) {
+                try { requestOverlayPermission(context) } catch (_: RuntimeException) {
+                    return "Open Android settings and allow Install Lock to display over other apps, then try again."
+                }
+                return "Allow Install Lock to display over other apps, then tap Floating password again."
+            }
+            return try {
+                context.startForegroundService(intent)
+                "Open the target app, tap its password field, then tap Enter password in the floating window."
+            } catch (_: RuntimeException) { "Could not open the floating password. Check display-over-other-apps permission." }
+        }
     }
+
+    private data class Session(val name: String, val expiresAt: Long, val displayValue: String?,
+                               val read: () -> InlineSecretClaim?, val close: () -> Unit)
 
     override fun onCreate() {
         super.onCreate()
         savedStateRegistryController.performRestore(null)
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        createNotificationChannel(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -61,20 +88,62 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         // IDs 1 and 2 belong to Install Lock's policy and VPN foreground services.
         startForeground(7001, buildForegroundNotification())
 
-        val name = intent?.getStringExtra(EXTRA_SECRET_NAME) ?: ""
-        val value = intent?.getStringExtra(EXTRA_SECRET_VALUE) ?: ""
-        val secretId = intent?.getStringExtra(EXTRA_SECRET_ID) ?: ""
-        val hideAtElapsedMs = intent?.getLongExtra(EXTRA_HIDE_AT_ELAPSED_MS, 0L) ?: 0L
-
-        showOverlay(name, value, secretId, hideAtElapsedMs)
+        try {
+            val requestId = intent?.getStringExtra(EXTRA_REQUEST_ID)
+            val session = if (requestId != null) requestSession(requestId)
+                else secretSession(intent?.getStringExtra(EXTRA_SECRET_ID).orEmpty(),
+                    intent?.getBooleanExtra(EXTRA_ENTRY_ONLY, true) != false)
+            if (session == null || !hasOverlayPermission(this)) {
+                Toast.makeText(this, "Password unavailable or expired. Request it again in Install Lock.", Toast.LENGTH_LONG).show()
+                removeOverlay()
+                stopSelf()
+            } else showOverlay(session)
+        } catch (_: RuntimeException) {
+            removeOverlay()
+            stopSelf()
+            Toast.makeText(this, "Could not open the floating password. Check display-over-other-apps permission.", Toast.LENGTH_LONG).show()
+        }
         return START_NOT_STICKY
+    }
+
+    private fun requestSession(id: String): Session? {
+        val requests = InstallLockRequests(this)
+        val request = requests.get(id) ?: return null
+        val (secret, _) = requests.availability(request) ?: return null
+        val expiresAt = requests.claimInline(id)?.expiresElapsed ?: return null
+        fun sameRequest() = requests.get(id)?.let { it.cycleId == request.cycleId && it.secretId == request.secretId } == true
+        return Session(secret.name, expiresAt, null, read = {
+            if (SystemClock.elapsedRealtime() >= expiresAt || !sameRequest()) null else requests.claimInline(id)
+        }, close = { if (sameRequest()) requests.completeInline(id) })
+    }
+
+    private fun secretSession(id: String, entryOnly: Boolean): Session? {
+        val secrets = SecretStore(this)
+        val timers = TimerStore(this)
+        val settings = SettingsStore(this)
+        fun timer(secret: Secret) = RevealTimer(id,
+            (secret.delayMinutes ?: settings.getDelayMinutes()) * 60_000L,
+            settings.getVisibleSeconds() * 1000L, timers)
+        val secret = secrets.getAll().firstOrNull { it.id == id } ?: return null
+        val initial = timer(secret).currentState()
+        if (initial.state != RevealState.REVEALED || initial.hideAtElapsedMs <= SystemClock.elapsedRealtime()) return null
+        val cycle = timers.get(id)?.cycleId ?: return null
+        return Session(secret.name, initial.hideAtElapsedMs, if (entryOnly) null else secret.value, read = {
+            val currentSecret = secrets.getAll().firstOrNull { it.id == id }
+            if (currentSecret == null || timers.get(id)?.cycleId != cycle || SystemClock.elapsedRealtime() >= initial.hideAtElapsedMs) null
+            else {
+                val current = timer(currentSecret).currentState(claim = false)
+                if (current.state != RevealState.REVEALED || current.hideAtElapsedMs <= SystemClock.elapsedRealtime()) null
+                else InlineSecretClaim(currentSecret.value, minOf(initial.hideAtElapsedMs, current.hideAtElapsedMs))
+            }
+        }, close = { if (timers.get(id)?.cycleId == cycle) timer(secret).closeEarly() })
     }
 
     private fun buildForegroundNotification(): Notification {
         return NotificationCompatBuilderHelper.build(this)
     }
 
-    private fun showOverlay(name: String, value: String, secretId: String, hideAtElapsedMs: Long) {
+    private fun showOverlay(session: Session) {
         removeOverlay() // in case one is already showing
 
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
@@ -83,7 +152,7 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -92,30 +161,48 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
         layoutParams = params
 
 
+        val feedback = mutableStateOf("")
+        fun finishSession() { removeOverlay(); stopSelf() }
+        fun read(): InlineSecretClaim? {
+            val grant = try { session.read() } catch (_: Exception) { null }
+            if (grant == null || grant.expiresElapsed <= SystemClock.elapsedRealtime()) {
+                Toast.makeText(this, "This password expired or was locked. Request it again.", Toast.LENGTH_LONG).show()
+                finishSession()
+                return null
+            }
+            return grant
+        }
         val view = ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(this@OverlayService)
             setViewTreeSavedStateRegistryOwner(this@OverlayService)
             setContent {
                 OverlayContent(
-                    name = name,
-                    value = value,
-                    hideAtElapsedMs = hideAtElapsedMs,
+                    name = session.name,
+                    value = session.displayValue,
+                    hideAtElapsedMs = session.expiresAt,
+                    feedback = feedback.value,
                     onClose = {
-                        RevealTimer(secretId, DEFAULT_DELAY_MS, DEFAULT_VISIBLE_MS, TimerStore(this@OverlayService)).closeEarly()
-                        removeOverlay()
-                        stopSelf()
+                        session.close()
+                        finishSession()
                     },
                     onExpired = {
-                        removeOverlay()
-                        stopSelf()
+                        finishSession()
                     },
                     onDrag = ::onOverlayDragged,
                     onCopy = {
-                        copySecretToClipboard(this@OverlayService, value)
-                        handler.postDelayed({
-                            clearClipboardIfMatches(this@OverlayService, value)
-                        }, CLIPBOARD_CLEAR_DELAY_MS)
+                        read()?.let { SecretClipboard.copyWithOptions(this@OverlayService, it.value) }
                     },
+                    onEnter = {
+                        read()?.let { grant ->
+                            val result = PasswordFieldEntry.enter(grant.value)
+                            if (result.success) {
+                                session.close()
+                                finishSession()
+                                Toast.makeText(this@OverlayService, result.message, Toast.LENGTH_LONG).show()
+                            } else feedback.value = result.message
+                        }
+                    }
                 )
             }
         }
@@ -134,6 +221,7 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     private fun removeOverlay() {
         overlayView?.let {
             try { windowManager.removeView(it) } catch (e: Exception) { /* already removed */ }
+            it.disposeComposition()
         }
         overlayView = null
     }
@@ -150,12 +238,14 @@ class OverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
 @Composable
 fun OverlayContent(
     name: String,
-    value: String,
+    value: String?,
     hideAtElapsedMs: Long,
     onClose: () -> Unit,
     onExpired: () -> Unit,
     onDrag: (Float, Float) -> Unit,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    onEnter: () -> Unit,
+    feedback: String
 ) {
     var remainingMs by remember { mutableStateOf(hideAtElapsedMs - SystemClock.elapsedRealtime()) }
 
@@ -173,7 +263,7 @@ fun OverlayContent(
     Surface(
         modifier = Modifier
             .padding(16.dp)
-            .widthIn(min = 260.dp)
+            .widthIn(min = 260.dp, max = 320.dp)
             .pointerInput(Unit) {
                 detectDragGestures { change, dragAmount ->
                     change.consume()
@@ -185,9 +275,10 @@ fun OverlayContent(
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(name, color = Color.White, style = MaterialTheme.typography.labelLarge)
+            Text(name, color = Color.White, style = MaterialTheme.typography.labelLarge,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(
+            if (value != null) Text(
                 value,
                 color = Color.White,
                 style = MaterialTheme.typography.headlineSmall,
@@ -197,9 +288,13 @@ fun OverlayContent(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text("Hides in ${formatDuration(remainingMs)}", color = Color.LightGray)
+            Text("Tap the password field in the other app, then Enter password. Nothing is copied or submitted.",
+                color = Color.White, style = MaterialTheme.typography.bodySmall)
+            if (feedback.isNotEmpty()) Text(feedback, color = Color(0xFFFFB4AB), style = MaterialTheme.typography.bodySmall)
             Spacer(modifier = Modifier.height(8.dp))
+            Button(onClick = onEnter, modifier = Modifier.fillMaxWidth()) { Text("Enter password") }
             Row {
-                Button(onClick = onCopy) {
+                if (value != null) Button(onClick = onCopy) {
                     Text("Copy")
                 }
                 Spacer(modifier = Modifier.width(8.dp))

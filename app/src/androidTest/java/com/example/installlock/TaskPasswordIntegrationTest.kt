@@ -19,6 +19,22 @@ class TaskPasswordIntegrationTest {
     }
     @After fun cleanUp() { prefs.edit().clear().commit() }
 
+    @Test fun freshSetupNeedsOnlyTaskPasswordsAndStillRequiresThemForChanges() {
+        val entries = TaskPasswords.required(context).mapIndexed { index, scope ->
+            NewTaskPassword(scope, "FreshScoped${index}Pass123", if (scope.kind == TaskKind.APP_UNLOCK) 15 else null)
+        }
+        assertFalse(Store.hasPassword(context))
+        assertNull(TaskPasswords.migrate(context, emptyMap(), entries, false))
+        assertTrue(TaskPasswords.ready(context))
+        assertFalse(Store.hasPassword(context))
+        val categories = entries.single { it.scope.kind == TaskKind.CATEGORIES }
+        val before = Store.immediatePlayCategories(context)
+        assertFalse(TaskSettings.categories(context, emptySet(), ""))
+        assertEquals(before, Store.immediatePlayCategories(context))
+        assertTrue(TaskSettings.categories(context, emptySet(), categories.password))
+        assertTrue(Store.immediatePlayCategories(context).isEmpty())
+    }
+
     @Test fun migrationVerifiesEveryExistingCredentialAndRetiresBroadPasswordsWithoutLosingRules() {
         val legacy = Store.Pw.entries.associateWith { "Old${it.name}Pass123" }
         legacy.forEach { (role, password) -> Store.setPassword(context, password, role) }
@@ -30,6 +46,7 @@ class TaskPasswordIntegrationTest {
             NewTaskPassword(scope, "NewScoped${index}Pass123", if (scope.kind == TaskKind.APP_UNLOCK) 15 else null)
         }
         assertNotNull(TaskPasswords.migrate(context, legacy + (Store.Pw.FILTER to "wrong"), entries, false))
+        assertNotNull(TaskPasswords.migrate(context, legacy + (Store.Pw.MAIN to "wrong"), entries, false))
         assertFalse(TaskPasswords.ready(context))
         assertTrue(Store.hasPassword(context, Store.Pw.FILTER))
         assertEquals(0L, Store.unlockedUntil(context, "com.google.android.youtube"))
