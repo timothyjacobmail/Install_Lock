@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.view.View
 import android.view.ViewGroup
+import android.text.InputType
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
@@ -30,7 +32,15 @@ class VerseAlarmScreenTest {
                 scenario.onActivity { activity ->
                     fun views() = descendants(activity.findViewById(android.R.id.content))
                     fun click(text: String) = views().filterIsInstance<TextView>().first { it.text.toString() == text }.performClick()
-                    views().filterIsInstance<EditText>().single().setText("wrong answer")
+                    val entry = views().filterIsInstance<EditText>().single()
+                    entry.requestFocus()
+                    val editor = EditorInfo()
+                    assertNotNull(entry.onCreateInputConnection(editor))
+                    assertEquals(InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD, editor.inputType and InputType.TYPE_MASK_VARIATION)
+                    assertTrue(editor.inputType and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0)
+                    assertTrue(editor.imeOptions and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0)
+                    assertNull(entry.transformationMethod)
+                    entry.setText("wrong answer")
                     click("Check my verse")
                     assertTrue(views().filterIsInstance<TextView>().any { it.text.startsWith("That does not match yet") })
                     assertEquals(0, VerseAlarmStore.read(c).verses.single().successes)

@@ -1,0 +1,22 @@
+InstallLock Voice Tasks & Reminders
+
+Speech recognition: Vosk Android (Apache-2.0), https://github.com/alphacep/vosk-api
+English model: vosk-model-small-en-us-0.15 (Apache-2.0), Alpha Cephei.
+Model SHA-256: 30f26242c4eb449f948e42cb302dd7a686cb29a3423a8367f99ff41780942498
+Source: https://alphacephei.com/vosk/models
+JNA (Apache-2.0 / LGPL-2.1 dual license; used under Apache-2.0).
+
+Alarm scheduling and stale-alarm validation adapted from SpeakAlert:
+https://github.com/ghostgramlabs/SpeakAlert
+Copyright SpeakAlert contributors. Licensed under Apache-2.0.
+Modified for InstallLock's task model, stable intent identities, offline local storage,
+notification actions, and duplicate-delivery prevention.
+See Apache-2.0.txt for the license.
+
+Architecture references inspected:
+Dicio: https://github.com/DicioTeam/dicio-android (GPL-3.0).
+Key Mapper: https://github.com/keymapperorg/KeyMapper (GPL-3.0).
+No GPL application source was copied. We use Dicio's underlying Apache-licensed
+Vosk engine directly. Wake activation here uses Vosk phrase recognition,
+not Dicio's OpenWakeWord models. Volume-key integration is independently written
+against Android AccessibilityService; it does not bundle Key Mapper's privileged bridge.

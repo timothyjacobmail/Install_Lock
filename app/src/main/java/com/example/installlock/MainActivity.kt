@@ -531,6 +531,7 @@ class MainActivity : AppCompatActivity() {
             button("Delayed Secrets") { startActivity(Intent(this, com.example.delayedsecrect.MainActivity::class.java)) },
             button("Why apps are locked") { goTo { showLockReasons() } },
             button("Verse wake-up alarm") { startActivity(Intent(this, VerseAlarmActivity::class.java)) },
+            button("Voice Tasks & Reminders") { startActivity(Intent(this, com.example.installlock.voice.VoiceTasksActivity::class.java)) },
             curfewActions(),
             focusActions(),
             watchdogActions(),

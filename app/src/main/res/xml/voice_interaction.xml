@@ -1,0 +1,1 @@
+<voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android" android:sessionService="com.example.installlock.voice.VoiceSessionService" android:recognitionService="com.example.installlock.voice.VoiceRecognitionService" android:supportsAssist="true" android:supportsLaunchVoiceAssistFromKeyguard="false" />

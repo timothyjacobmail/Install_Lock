@@ -56,6 +56,64 @@ class VerseAlarmStoreTest {
         assertTrue(VerseAlarmStore.answer(c, ch.id, text, false, now))
     }
 
+    @Test fun addingPassagesWhileDailyAlarmIsEnabledPreservesItsSchedule() {
+        val now = WatchdogStore.clock(c)
+        val wakeTime = java.time.Instant.ofEpochMilli(now.wall).atZone(java.time.ZoneId.systemDefault()).plusHours(2)
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true, wakeTime.hour, wakeTime.minute, 4), now)
+        val before = VerseAlarmStore.read(c)
+        VerseAlarmStore.addVerse(c, "Another original passage", "Begin the day with a clear mind and a grateful heart.")
+        val after = VerseAlarmStore.read(c)
+        assertEquals(2, after.verses.size)
+        assertEquals(before.config, after.config)
+        assertEquals(before.nextAlarm, after.nextAlarm)
+        assertEquals(before.verses.single(), after.verses.first())
+        assertNull(after.challenge)
+    }
+
+    @Test fun addingPassagesDuringAnActiveRoutineIsRejected() {
+        ring()
+        val before = VerseAlarmStore.read(c).verses
+        assertThrows(IllegalStateException::class.java) {
+            VerseAlarmStore.addVerse(c, "New passage", "Begin the day with a clear mind.")
+        }
+        assertEquals(before, VerseAlarmStore.read(c).verses)
+    }
+
+    @Test fun dailyWarningIsOneMinuteEarlyAndCanCompleteTheFirstCheck() {
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true), start)
+        val due = VerseAlarmStore.read(c).nextAlarm
+        val warningTime = start.copy(wall = due - 60_000, elapsed = start.elapsed + due - start.wall - 60_000)
+        assertNull(VerseAlarmStore.reconcile(c, warningTime.copy(wall = warningTime.wall - 1,
+            elapsed = warningTime.elapsed - 1)).challenge)
+        val state = VerseAlarmStore.reconcile(c, warningTime)
+        val ch = state.challenge!!
+        assertTrue(ch.warning(warningTime))
+        assertEquals(due, ch.dueWall)
+        assertTrue(state.nextAlarm > due)
+        assertNotNull(VerseAlarmStore.takeWarning(c, warningTime))
+        assertNull(VerseAlarmStore.takeWarning(c, warningTime))
+        assertTrue(VerseAlarmStore.read(c).challenge!!.warningSent)
+        assertTrue(VerseAlarmStore.answer(c, ch.id, text, false, warningTime))
+        assertFalse(VerseAlarmStore.answer(c, ch.id, text, false, warningTime))
+        val next = VerseAlarmStore.read(c).challenge!!
+        assertEquals(1, next.round)
+        assertEquals(300_000L, next.remaining(warningTime))
+        assertFalse(next.warningSent)
+    }
+
+    @Test fun followUpAcceptsAnAnswerOnlyInItsLastMinuteAndDoesNotExtendTheDeadline() {
+        val (now, ch) = ring()
+        VerseAlarmStore.answer(c, ch.id, text, false, now)
+        val next = VerseAlarmStore.read(c).challenge!!
+        val early = now.copy(wall = now.wall + 239_999, elapsed = now.elapsed + 239_999)
+        assertFalse(VerseAlarmStore.answer(c, next.id, text, false, early))
+        val warningTime = early.copy(wall = early.wall + 1, elapsed = early.elapsed + 1)
+        assertNotNull(VerseAlarmStore.takeWarning(c, warningTime))
+        assertEquals(next.dueElapsed, VerseAlarmStore.read(c).challenge!!.dueElapsed)
+        assertFalse(VerseAlarmStore.quiet(c, next.id, warningTime))
+        assertTrue(VerseAlarmStore.answer(c, next.id, text, false, warningTime))
+    }
+
     @Test fun maturedDisableCannotCancelAnActiveRoutine() {
         val (now, ch) = ring()
         VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false), now)
@@ -78,11 +136,40 @@ class VerseAlarmStoreTest {
     }
 
     @Test fun delayedSettingsCannotBeAcceleratedByWallTimeAndRestartWaitAfterBoot() {
-        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true), start)
-        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false), start)
-        val shifted = start.copy(wall = start.wall + 100_000, elapsed = start.elapsed + 30_000)
+        val (now, _) = ring()
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false), now)
+        val shifted = now.copy(wall = now.wall + 100_000, elapsed = now.elapsed + 30_000)
         assertTrue(VerseAlarmStore.reconcile(c, shifted).config.enabled)
         val boot = shifted.copy(elapsed = 1000, boot = 9)
         assertEquals(900_000L, VerseAlarmStore.reconcile(c, boot).countdown!!.remaining(boot))
+    }
+
+    @Test fun idleAlterationsAreImmediateEvenAfterTheAlarmWasEnabledBefore() {
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true), start)
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false), start)
+        val off = VerseAlarmStore.read(c)
+        assertFalse(off.config.enabled)
+        assertNull(off.pending)
+        assertNull(off.countdown)
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true, 8, 30, 4), start)
+        assertEquals(VerseAlarmConfig(true, 8, 30, 4), VerseAlarmStore.read(c).config)
+        assertNull(VerseAlarmStore.read(c).countdown)
+    }
+
+    @Test fun completingTheRoutineRemovesAnyRemainingAlterationWait() {
+        var (now, ch) = ring()
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false), now)
+        repeat(3) {
+            assertTrue(VerseAlarmStore.answer(c, ch.id, text, false, now))
+            if (it < 2) {
+                ch = VerseAlarmStore.read(c).challenge!!
+                now = now.copy(wall = now.wall + 300_000, elapsed = now.elapsed + 300_000)
+            }
+        }
+        val done = VerseAlarmStore.read(c)
+        assertNull(done.challenge)
+        assertFalse(done.config.enabled)
+        assertNull(done.pending)
+        assertNull(done.countdown)
     }
 }

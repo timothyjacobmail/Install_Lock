@@ -33,6 +33,8 @@ android {
 }
 
 dependencies {
+    implementation("com.alphacephei:vosk-android:0.3.75@aar")
+    implementation("net.java.dev.jna:jna:5.18.1@aar")
     implementation(project(":secretvault"))
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)

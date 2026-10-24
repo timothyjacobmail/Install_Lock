@@ -26,6 +26,8 @@ import com.example.delayedsecrect.PasswordEntryResult
 /** Reads browser pages and visible Google app content locally; never saves the inspected text. */
 @Suppress("DEPRECATION")
 class BrowserKeywordService : AccessibilityService() {
+    private val voiceVolume by lazy { com.example.installlock.voice.VoiceVolumeTrigger(this) }
+    override fun onKeyEvent(event: android.view.KeyEvent): Boolean = voiceVolume.key(event)
     private val handler = Handler(Looper.getMainLooper())
     private var targets = setOf(Policy.CHROME, BrowserPackages.GOOGLE_APP)
     private var scanScheduled = false
@@ -509,6 +511,7 @@ class BrowserKeywordService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        voiceVolume.close()
         connected = false
         PasswordFieldEntry.detach()
         SecretClipboard.detachAccessibility()

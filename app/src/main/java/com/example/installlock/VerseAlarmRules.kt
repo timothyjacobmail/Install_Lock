@@ -14,15 +14,18 @@ internal data class VerseAlarmConfig(val enabled: Boolean = false, val hour: Int
 
 internal data class VerseChallenge(val id: String, val verseId: String, val round: Int,
     val fromMemory: Boolean, val dueWall: Long, val dueElapsed: Long, val boot: Int,
-    val waiting: Boolean = false, val quietUsed: Boolean = false) {
+    val waiting: Boolean = false, val quietUsed: Boolean = false, val warningSent: Boolean = false) {
     fun remaining(now: WatchdogClock): Long =
         (if (now.boot == boot) dueElapsed - now.elapsed else dueWall - now.wall).coerceIn(0, 300_000)
     fun ringing(now: WatchdogClock) = remaining(now) == 0L
+    fun warning(now: WatchdogClock) = waiting && remaining(now) in 1..VerseAlarmRules.WARNING_MS
+    fun canAnswer(now: WatchdogClock) = !waiting || remaining(now) <= VerseAlarmRules.WARNING_MS
 }
 
 /** Pure rules shared by scheduling, the challenge screen and tests. */
 internal object VerseAlarmRules {
     const val ROUNDS = 3
+    const val WARNING_MS = 60_000L
     const val FOLLOW_UP_MS = 5 * 60_000L
     const val CHANGE_DELAY_MINUTES = 15
 
