@@ -14,6 +14,7 @@ import android.util.Log
 internal object VerseAlarmScheduler {
     const val FIRE = "com.example.installlock.VERSE_ALARM"
     const val CHANGE = "com.example.installlock.VERSE_ALARM_CHANGE"
+    const val WARN = "com.example.installlock.VERSE_ALARM_WARN"
     const val CHANNEL = "verse_alarm"
     const val NOTIFICATION = 4701
 
@@ -31,6 +32,7 @@ internal object VerseAlarmScheduler {
                 description = "Daily alarm and verse follow-up challenges"
                 setSound(null, null) // The foreground service owns looping alarm audio.
             })
+        VerseAlarmWarning.channel(c)
     }
 
     fun readiness(c: Context): List<String> = buildList {
@@ -40,6 +42,8 @@ internal object VerseAlarmScheduler {
         val manager = c.getSystemService(NotificationManager::class.java)
         if (!manager.areNotificationsEnabled() || manager.getNotificationChannel(CHANNEL).importance < NotificationManager.IMPORTANCE_HIGH)
             add("Allow high-priority alarm notifications")
+        if (manager.getNotificationChannel(VerseAlarmWarning.CHANNEL).importance < NotificationManager.IMPORTANCE_HIGH)
+            add("Allow one-minute verse warning notifications")
         if (Build.VERSION.SDK_INT >= 34 && !manager.canUseFullScreenIntent()) add("Allow full-screen alarms")
         if (c.getSystemService(AudioManager::class.java).getStreamVolume(AudioManager.STREAM_ALARM) == 0)
             add("Raise the alarm volume above zero")
@@ -66,6 +70,13 @@ internal object VerseAlarmScheduler {
             Log.w("VerseAlarm", "Exact alarm permission unavailable", e)
             manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, next, alarm)
         }
+        val warning = operation(c, WARN)
+        val warningAt = s.nextWarningAt(now)
+        if (warningAt == null) manager.cancel(warning)
+        else try {
+            if (canExact) manager.setAlarmClock(AlarmManager.AlarmClockInfo(warningAt, content(c)), warning)
+            else manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, warningAt, warning)
+        } catch (_: SecurityException) { manager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, warningAt, warning) }
         val change = operation(c, CHANGE)
         if (s.countdown == null || ch != null) manager.cancel(change)
         else {
@@ -79,6 +90,8 @@ internal object VerseAlarmScheduler {
 
     /** Called after a user action or delivery of an exact alarm. */
     fun sync(c: Context) {
+        VerseAlarmStore.reconcile(c)
+        VerseAlarmWarning.sync(c)
         reschedule(c)
         val ch = VerseAlarmStore.read(c).challenge
         if (ch?.ringing(WatchdogStore.clock(c)) == true) {
@@ -91,7 +104,7 @@ internal object VerseAlarmScheduler {
 class VerseAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
-            VerseAlarmScheduler.FIRE, VerseAlarmScheduler.CHANGE -> VerseAlarmScheduler.sync(context)
+            VerseAlarmScheduler.FIRE, VerseAlarmScheduler.CHANGE, VerseAlarmScheduler.WARN -> VerseAlarmScheduler.sync(context)
             Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED ->
                 VerseAlarmScheduler.reschedule(context, timeChanged = true, boot = true)
             Intent.ACTION_BOOT_COMPLETED, Intent.ACTION_LOCKED_BOOT_COMPLETED, Intent.ACTION_MY_PACKAGE_REPLACED,

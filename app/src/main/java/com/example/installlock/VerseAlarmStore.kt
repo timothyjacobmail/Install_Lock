@@ -8,7 +8,33 @@ import java.util.UUID
 internal data class VerseAlarmState(val config: VerseAlarmConfig = VerseAlarmConfig(),
     val verses: List<AlarmVerse> = emptyList(), val challenge: VerseChallenge? = null,
     val nextAlarm: Long = 0, val pending: VerseAlarmConfig? = null,
-    val countdown: TaskCountdown? = null, val everArmed: Boolean = false)
+    val countdown: TaskCountdown? = null, val everArmed: Boolean = false) {
+    fun requestConfig(config: VerseAlarmConfig, now: WatchdogClock): VerseAlarmState =
+        if (challenge == null) copy(config = config, everArmed = everArmed || config.enabled,
+            pending = null, countdown = null,
+            nextAlarm = if (config.enabled) VerseAlarmRules.nextDaily(config, now.wall) else 0)
+        else copy(pending = config,
+            countdown = TaskCountdown.start(VerseAlarmRules.CHANGE_DELAY_MINUTES, now))
+
+    /** The alteration wait is relevant only while a routine is still active. */
+    fun applyPendingIfIdle(now: WatchdogClock): VerseAlarmState {
+        val requested = pending ?: return this
+        if (challenge != null || (requested.enabled && verses.isEmpty())) return this
+        return requestConfig(requested, now)
+    }
+
+    fun nextWarningAt(now: WatchdogClock): Long? {
+        val ch = challenge
+        val due = if (ch == null) {
+            if (!config.enabled || nextAlarm <= now.wall) return null
+            nextAlarm
+        } else {
+            if (!ch.waiting || ch.warningSent || ch.ringing(now)) return null
+            now.wall + ch.remaining(now)
+        }
+        return (due - VerseAlarmRules.WARNING_MS).coerceAtLeast(now.wall + 1000)
+    }
+}
 
 /** One durable snapshot makes answer credit and advancement atomic, including after a reboot.
  * Device-protected storage lets an alarm ring before the first unlock after restarting. */
@@ -30,7 +56,7 @@ internal object VerseAlarmStore {
         val challenge = o.optJSONObject("challenge")?.let { VerseChallenge(it.getString("id"),
             it.getString("verse"), it.getInt("round"), it.getBoolean("memory"),
             it.getLong("wall"), it.getLong("elapsed"), it.getInt("boot"),
-            it.getBoolean("waiting"), it.getBoolean("quietUsed")) }
+            it.getBoolean("waiting"), it.getBoolean("quietUsed"), it.optBoolean("warningSent")) }
         val countdown = o.optJSONObject("countdown")?.let {
             TaskCountdown(it.getLong("due"), it.getInt("boot"), it.getLong("duration")) }
         return VerseAlarmState(config(o.getJSONObject("config")), verses, challenge,
@@ -47,7 +73,7 @@ internal object VerseAlarmStore {
         s.challenge?.let { o.put("challenge", JSONObject().put("id", it.id).put("verse", it.verseId)
             .put("round", it.round).put("memory", it.fromMemory).put("wall", it.dueWall)
             .put("elapsed", it.dueElapsed).put("boot", it.boot).put("waiting", it.waiting)
-            .put("quietUsed", it.quietUsed)) }
+            .put("quietUsed", it.quietUsed).put("warningSent", it.warningSent)) }
         s.pending?.let { o.put("pending", encode(it)) }
         s.countdown?.let { o.put("countdown", JSONObject().put("due", it.dueElapsed)
             .put("boot", it.boot).put("duration", it.duration)) }
@@ -58,10 +84,7 @@ internal object VerseAlarmStore {
         require(config.valid())
         val s = reconcile(c, now)
         require(!config.enabled || s.verses.isNotEmpty()) { "Add an ESV passage first." }
-        if (!s.everArmed) write(c, s.copy(config = config, everArmed = config.enabled,
-            nextAlarm = if (config.enabled) VerseAlarmRules.nextDaily(config, now.wall) else 0))
-        else write(c, s.copy(pending = config,
-            countdown = TaskCountdown.start(VerseAlarmRules.CHANGE_DELAY_MINUTES, now)))
+        write(c, s.requestConfig(config, now))
     }
 
     @Synchronized fun cancelChange(c: Context) {
@@ -70,8 +93,8 @@ internal object VerseAlarmStore {
     }
 
     @Synchronized fun addVerse(c: Context, reference: String, text: String) {
-        val s = read(c)
-        check(!s.config.enabled && s.challenge == null) { "Turn the alarm off before editing passages." }
+        val s = reconcile(c)
+        check(s.challenge == null) { "Finish the current wake-up routine before adding passages." }
         require(reference.trim().length in 1..100 && text.trim().length in 1..6000 &&
             VerseAlarmRules.words(text).size in 3..500) { "Enter a reference and a passage of 3–500 words." }
         require(s.verses.size < 200) { "The library holds up to 200 passages." }
@@ -86,12 +109,12 @@ internal object VerseAlarmStore {
         write(c, s.copy(verses = s.verses.filterNot { it.id == id }))
     }
 
-    private fun challenge(s: VerseAlarmState, round: Int, now: WatchdogClock): VerseChallenge {
+    private fun challenge(s: VerseAlarmState, round: Int, now: WatchdogClock, delay: Long =
+        if (round == 0) 0L else VerseAlarmRules.FOLLOW_UP_MS): VerseChallenge {
         val v = VerseAlarmRules.choose(s.verses, s.config.memoryAfter, round)
-        val delay = if (round == 0) 0L else VerseAlarmRules.FOLLOW_UP_MS
         return VerseChallenge(UUID.randomUUID().toString(), v.id, round,
             v.successes >= s.config.memoryAfter, now.wall + delay, now.elapsed + delay,
-            now.boot, waiting = round > 0)
+            now.boot, waiting = delay > 0)
     }
 
     @Synchronized fun reconcile(c: Context, now: WatchdogClock = WatchdogStore.clock(c),
@@ -101,14 +124,11 @@ internal object VerseAlarmStore {
         val timer = s.countdown?.reconcile(now)
         if (timer != s.countdown) s = s.copy(countdown = timer)
         // A due alarm wins over a pending settings change. Settings never end an active routine.
-        if (s.config.enabled && s.challenge == null && s.nextAlarm > 0 && s.nextAlarm <= now.wall && !timeChanged)
-            s = s.copy(challenge = challenge(s, 0, now), nextAlarm = VerseAlarmRules.nextDaily(s.config, now.wall))
-        if (s.challenge == null && s.pending != null && timer?.remaining(now) == 0L) {
-            val config = s.pending
-            if (!config.enabled || s.verses.isNotEmpty()) s = s.copy(config = config,
-                pending = null, countdown = null, everArmed = s.everArmed || config.enabled,
-                nextAlarm = if (config.enabled) VerseAlarmRules.nextDaily(config, now.wall) else 0)
-        }
+        if (s.config.enabled && s.challenge == null && s.nextAlarm > 0 &&
+            s.nextAlarm - VerseAlarmRules.WARNING_MS <= now.wall && !timeChanged)
+            s = s.copy(challenge = challenge(s, 0, now, (s.nextAlarm - now.wall).coerceAtLeast(0)),
+                nextAlarm = VerseAlarmRules.nextDaily(s.config, maxOf(now.wall, s.nextAlarm)))
+        s = s.applyPendingIfIdle(now)
         if (timeChanged && s.config.enabled) s = s.copy(nextAlarm = VerseAlarmRules.nextDaily(s.config, now.wall))
         // Rebase a follow-up once after reboot; wall-clock changes during a boot cannot skip it.
         s.challenge?.takeIf { it.boot != now.boot }?.let {
@@ -123,14 +143,23 @@ internal object VerseAlarmStore {
         now: WatchdogClock = WatchdogStore.clock(c)): Boolean {
         val s = reconcile(c, now)
         val ch = s.challenge ?: return false
-        if (ch.id != id || (ch.waiting && !ch.ringing(now))) return false
+        if (ch.id != id || !ch.canAnswer(now)) return false
         val verse = s.verses.first { it.id == ch.verseId }
         if (!VerseAlarmRules.matches(verse.text, answer, dictated)) return false
         val updated = s.copy(verses = s.verses.map { if (it.id != verse.id) it else
             it.copy(successes = (it.successes + 1).coerceAtMost(1_000_000), lastUsed = now.wall) })
         write(c, updated.copy(challenge = if (ch.round + 1 == VerseAlarmRules.ROUNDS) null
-            else challenge(updated, ch.round + 1, now)))
+            else challenge(updated, ch.round + 1, now)).applyPendingIfIdle(now))
         return true
+    }
+
+    /** Commit once per check so duplicate broadcasts and restarts do not repeat the chime. */
+    @Synchronized fun takeWarning(c: Context, now: WatchdogClock = WatchdogStore.clock(c)): VerseChallenge? {
+        val s = reconcile(c, now)
+        val ch = s.challenge ?: return null
+        if (!ch.warning(now) || ch.warningSent) return null
+        write(c, s.copy(challenge = ch.copy(warningSent = true)))
+        return ch
     }
 
     @Synchronized fun quiet(c: Context, id: String, now: WatchdogClock = WatchdogStore.clock(c)): Boolean {
