@@ -24,14 +24,15 @@ internal object VerseAlarmWarning {
 
     fun sync(c: Context) {
         val now = WatchdogStore.clock(c)
-        val ch = VerseAlarmStore.read(c).challenge
+        val state = VerseAlarmStore.read(c)
+        val ch = state.challenge
         val manager = c.getSystemService(NotificationManager::class.java)
         if (ch?.warning(now) != true) { manager.cancel(NOTIFICATION); return }
         val warning = VerseAlarmStore.takeWarning(c, now) ?: return
         channel(c)
         manager.notify(NOTIFICATION, Notification.Builder(c, CHANNEL)
             .setSmallIcon(R.drawable.ic_il_alarm)
-            .setContentTitle("Alarm soon · check ${warning.round + 1} of ${VerseAlarmRules.ROUNDS}")
+            .setContentTitle("Alarm soon · check ${warning.round + 1} of ${state.config.sessions}")
             .setContentText("Enter your verse now to complete this check before the alarm rings.")
             .setCategory(Notification.CATEGORY_ALARM).setVisibility(Notification.VISIBILITY_PUBLIC)
             .setContentIntent(VerseAlarmScheduler.content(c))

@@ -42,21 +42,28 @@ internal object VerseAlarmStore {
     private fun prefs(c: Context) = c.createDeviceProtectedStorageContext()
         .getSharedPreferences("verse_alarm", Context.MODE_PRIVATE)
     private fun config(o: JSONObject) = VerseAlarmConfig(o.getBoolean("enabled"),
-        o.getInt("hour"), o.getInt("minute"), o.getInt("memoryAfter"))
+        o.getInt("hour"), o.getInt("minute"), o.getInt("memoryAfter"), o.optInt("sessions", 3),
+        o.optJSONArray("additionalTimes")?.let { a -> (0 until a.length()).map { i ->
+            a.getJSONObject(i).let { VerseAlarmTime(it.getInt("hour"), it.getInt("minute")) }
+        } } ?: emptyList())
     private fun encode(v: VerseAlarmConfig) = JSONObject().put("enabled", v.enabled)
         .put("hour", v.hour).put("minute", v.minute).put("memoryAfter", v.memoryAfter)
+        .put("sessions", v.sessions).put("additionalTimes", JSONArray().apply {
+            v.additionalTimes.forEach { put(JSONObject().put("hour", it.hour).put("minute", it.minute)) }
+        })
 
     @Synchronized fun read(c: Context): VerseAlarmState {
         val raw = prefs(c).getString("state", null) ?: return VerseAlarmState()
         val o = JSONObject(raw)
         val verses = o.getJSONArray("verses").let { a -> (0 until a.length()).map { i ->
             a.getJSONObject(i).let { AlarmVerse(it.getString("id"), it.getString("reference"),
-                it.getString("text"), it.getInt("successes"), it.getLong("lastUsed")) }
+                it.getString("text"), it.getInt("successes"), it.getLong("lastUsed"), it.optInt("quietSeconds", 60)) }
         } }
         val challenge = o.optJSONObject("challenge")?.let { VerseChallenge(it.getString("id"),
             it.getString("verse"), it.getInt("round"), it.getBoolean("memory"),
             it.getLong("wall"), it.getLong("elapsed"), it.getInt("boot"),
-            it.getBoolean("waiting"), it.getBoolean("quietUsed"), it.optBoolean("warningSent")) }
+            it.getBoolean("waiting"), it.getBoolean("quietUsed"), it.optBoolean("warningSent"),
+            it.optLong("quietDurationMs", 60_000)) }
         val countdown = o.optJSONObject("countdown")?.let {
             TaskCountdown(it.getLong("due"), it.getInt("boot"), it.getLong("duration")) }
         return VerseAlarmState(config(o.getJSONObject("config")), verses, challenge,
@@ -68,12 +75,14 @@ internal object VerseAlarmStore {
         val o = JSONObject().put("config", encode(s.config)).put("nextAlarm", s.nextAlarm)
             .put("everArmed", s.everArmed).put("verses", JSONArray().apply {
                 s.verses.forEach { put(JSONObject().put("id", it.id).put("reference", it.reference)
-                    .put("text", it.text).put("successes", it.successes).put("lastUsed", it.lastUsed)) }
+                    .put("text", it.text).put("successes", it.successes).put("lastUsed", it.lastUsed)
+                    .put("quietSeconds", it.quietSeconds)) }
             })
         s.challenge?.let { o.put("challenge", JSONObject().put("id", it.id).put("verse", it.verseId)
             .put("round", it.round).put("memory", it.fromMemory).put("wall", it.dueWall)
             .put("elapsed", it.dueElapsed).put("boot", it.boot).put("waiting", it.waiting)
-            .put("quietUsed", it.quietUsed).put("warningSent", it.warningSent)) }
+            .put("quietUsed", it.quietUsed).put("warningSent", it.warningSent)
+            .put("quietDurationMs", it.quietDurationMs)) }
         s.pending?.let { o.put("pending", encode(it)) }
         s.countdown?.let { o.put("countdown", JSONObject().put("due", it.dueElapsed)
             .put("boot", it.boot).put("duration", it.duration)) }
@@ -92,14 +101,24 @@ internal object VerseAlarmStore {
         write(c, s.copy(pending = null, countdown = null))
     }
 
-    @Synchronized fun addVerse(c: Context, reference: String, text: String) {
+    @Synchronized fun addVerse(c: Context, reference: String, text: String, quietSeconds: Int = 60) {
         val s = reconcile(c)
         check(s.challenge == null) { "Finish the current wake-up routine before adding passages." }
         require(reference.trim().length in 1..100 && text.trim().length in 1..6000 &&
             VerseAlarmRules.words(text).size in 3..500) { "Enter a reference and a passage of 3–500 words." }
         require(s.verses.size < 200) { "The library holds up to 200 passages." }
         require(s.verses.none { VerseAlarmRules.words(it.text) == VerseAlarmRules.words(text) }) { "That passage is already saved." }
-        write(c, s.copy(verses = s.verses + AlarmVerse(UUID.randomUUID().toString(), reference.trim(), text.trim())))
+        require(quietSeconds in 1..VerseAlarmRules.MAX_QUIET_SECONDS) { "Use a quiet time of 1–3600 seconds." }
+        write(c, s.copy(verses = s.verses + AlarmVerse(UUID.randomUUID().toString(), reference.trim(), text.trim(),
+            quietSeconds = quietSeconds)))
+    }
+
+    @Synchronized fun setQuietTime(c: Context, id: String, seconds: Int) {
+        val s = reconcile(c)
+        check(s.challenge == null) { "Finish the current wake-up routine before changing quiet times." }
+        require(seconds in 1..VerseAlarmRules.MAX_QUIET_SECONDS) { "Use a quiet time of 1–3600 seconds." }
+        require(s.verses.any { it.id == id }) { "Passage no longer exists." }
+        write(c, s.copy(verses = s.verses.map { if (it.id == id) it.copy(quietSeconds = seconds) else it }))
     }
 
     @Synchronized fun removeVerse(c: Context, id: String) {
@@ -124,10 +143,11 @@ internal object VerseAlarmStore {
         val timer = s.countdown?.reconcile(now)
         if (timer != s.countdown) s = s.copy(countdown = timer)
         // A due alarm wins over a pending settings change. Settings never end an active routine.
+        // Advance from the scheduled time so alarms overlapping a routine are not skipped.
         if (s.config.enabled && s.challenge == null && s.nextAlarm > 0 &&
             s.nextAlarm - VerseAlarmRules.WARNING_MS <= now.wall && !timeChanged)
             s = s.copy(challenge = challenge(s, 0, now, (s.nextAlarm - now.wall).coerceAtLeast(0)),
-                nextAlarm = VerseAlarmRules.nextDaily(s.config, maxOf(now.wall, s.nextAlarm)))
+                nextAlarm = VerseAlarmRules.nextDaily(s.config, s.nextAlarm))
         s = s.applyPendingIfIdle(now)
         if (timeChanged && s.config.enabled) s = s.copy(nextAlarm = VerseAlarmRules.nextDaily(s.config, now.wall))
         // Rebase a follow-up once after reboot; wall-clock changes during a boot cannot skip it.
@@ -148,7 +168,7 @@ internal object VerseAlarmStore {
         if (!VerseAlarmRules.matches(verse.text, answer, dictated)) return false
         val updated = s.copy(verses = s.verses.map { if (it.id != verse.id) it else
             it.copy(successes = (it.successes + 1).coerceAtMost(1_000_000), lastUsed = now.wall) })
-        write(c, updated.copy(challenge = if (ch.round + 1 == VerseAlarmRules.ROUNDS) null
+        write(c, updated.copy(challenge = if (ch.round + 1 >= s.config.sessions) null
             else challenge(updated, ch.round + 1, now)).applyPendingIfIdle(now))
         return true
     }
@@ -166,8 +186,10 @@ internal object VerseAlarmStore {
         val s = reconcile(c, now)
         val ch = s.challenge ?: return false
         if (ch.id != id || ch.quietUsed || !ch.ringing(now)) return false
-        write(c, s.copy(challenge = ch.copy(dueWall = now.wall + 60_000,
-            dueElapsed = now.elapsed + 60_000, boot = now.boot, quietUsed = true, waiting = false)))
+        val duration = s.verses.first { it.id == ch.verseId }.quietSeconds * 1000L
+        write(c, s.copy(challenge = ch.copy(dueWall = now.wall + duration,
+            dueElapsed = now.elapsed + duration, boot = now.boot, quietUsed = true, waiting = false,
+            quietDurationMs = duration)))
         return true
     }
 }

@@ -172,4 +172,87 @@ class VerseAlarmStoreTest {
         assertNull(done.pending)
         assertNull(done.countdown)
     }
+
+    @Test fun oldSavedSettingsKeepTheirDefaults() {
+        VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true), start)
+        val json = org.json.JSONObject(prefs.getString("state", null)!!)
+        json.getJSONObject("config").apply { remove("sessions"); remove("additionalTimes") }
+        json.getJSONArray("verses").getJSONObject(0).remove("quietSeconds")
+        prefs.edit().putString("state", json.toString()).commit()
+        val restored = VerseAlarmStore.read(c)
+        assertEquals(3, restored.config.sessions)
+        assertEquals(listOf(VerseAlarmTime(7, 0)), restored.config.times)
+        assertEquals(60, restored.verses.single().quietSeconds)
+    }
+
+    @Test fun customQuietTimesPersistPerVerseAndSurviveReboot() {
+        val first = VerseAlarmStore.read(c).verses.single().id
+        VerseAlarmStore.setQuietTime(c, first, 900)
+        val (now, ch) = ring()
+        assertTrue(VerseAlarmStore.quiet(c, ch.id, now))
+        assertEquals(900_000L, VerseAlarmStore.read(c).challenge!!.remaining(now))
+        val boot = now.copy(wall = now.wall + 5000, elapsed = 1000, boot = 9)
+        assertEquals(895_000L, VerseAlarmStore.reconcile(c, boot).challenge!!.remaining(boot))
+        assertFalse(VerseAlarmStore.quiet(c, ch.id, boot))
+        assertThrows(IllegalStateException::class.java) { VerseAlarmStore.setQuietTime(c, first, 60) }
+    }
+
+    @Test fun quietTimesBelongToIndividualVersesAndInvalidValuesAreRejected() {
+        val first = VerseAlarmStore.read(c).verses.single()
+        VerseAlarmStore.setQuietTime(c, first.id, 900)
+        VerseAlarmStore.addVerse(c, "Another passage", "Begin today with a clear mind.", 30)
+        for (seconds in listOf(0, -1, 3601)) {
+            assertThrows(IllegalArgumentException::class.java) { VerseAlarmStore.setQuietTime(c, first.id, seconds) }
+            assertThrows(IllegalArgumentException::class.java) {
+                VerseAlarmStore.addVerse(c, "Other", "Another original test passage.", seconds)
+            }
+        }
+        assertEquals(listOf(900, 30), VerseAlarmStore.read(c).verses.map { it.quietSeconds })
+    }
+
+    @Test fun configuredSessionCountControlsCompletionAndActiveChangesWait() {
+        for (sessions in listOf(1, 5)) {
+            VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true, sessions = sessions), start)
+            val due = VerseAlarmStore.read(c).nextAlarm
+            var now = start.copy(wall = due, elapsed = start.elapsed + due - start.wall)
+            VerseAlarmStore.reconcile(c, now)
+            VerseAlarmStore.saveConfig(c, VerseAlarmConfig(false, sessions = 2,
+                additionalTimes = listOf(VerseAlarmTime(18, 0))), now)
+            assertEquals(sessions, VerseAlarmStore.read(c).config.sessions)
+            assertEquals(2, VerseAlarmStore.read(c).pending!!.sessions)
+            repeat(sessions) { index ->
+                val ch = VerseAlarmStore.read(c).challenge!!
+                assertEquals(index, ch.round)
+                assertTrue(VerseAlarmStore.answer(c, ch.id, text, false, now))
+                now = now.copy(wall = now.wall + 300_000, elapsed = now.elapsed + 300_000)
+            }
+            val done = VerseAlarmStore.read(c)
+            assertNull(done.challenge)
+            assertFalse(done.config.enabled)
+            assertEquals(2, done.config.sessions)
+            assertEquals(listOf(VerseAlarmTime(18, 0)), done.config.additionalTimes)
+        }
+    }
+
+    @Test fun overlappingAlarmsRunInOrderWithoutLosingIntermediateTimes() {
+        val config = VerseAlarmConfig(true, 7, 0, sessions = 1,
+            additionalTimes = listOf(VerseAlarmTime(7, 1), VerseAlarmTime(7, 2)))
+        VerseAlarmStore.saveConfig(c, config, start)
+        assertEquals(config, VerseAlarmStore.read(c).config)
+        val due = VerseAlarmStore.read(c).nextAlarm
+        val now = start.copy(wall = due, elapsed = start.elapsed + due - start.wall)
+        val first = VerseAlarmStore.reconcile(c, now).challenge!!
+        val later = now.copy(wall = due + 600_000, elapsed = now.elapsed + 600_000)
+        assertEquals(first.id, VerseAlarmStore.reconcile(c, later).challenge!!.id)
+        assertTrue(VerseAlarmStore.answer(c, first.id, text, false, later))
+        val second = VerseAlarmStore.reconcile(c, later).challenge!!
+        assertEquals(due + 120_000, VerseAlarmStore.read(c).nextAlarm)
+        assertTrue(second.ringing(later))
+        assertTrue(VerseAlarmStore.answer(c, second.id, text, false, later))
+        val third = VerseAlarmStore.reconcile(c, later).challenge!!
+        assertTrue(VerseAlarmStore.answer(c, third.id, text, false, later))
+        assertNull(VerseAlarmStore.reconcile(c, later).challenge)
+        assertEquals(3, VerseAlarmStore.read(c).verses.single().successes)
+        assertEquals(due + 86_400_000, VerseAlarmStore.read(c).nextAlarm)
+    }
 }

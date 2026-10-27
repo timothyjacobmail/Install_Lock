@@ -59,4 +59,38 @@ class VerseAlarmRulesTest {
         val next = VerseAlarmRules.nextDaily(config, Instant.parse("2026-03-08T05:00:00Z").toEpochMilli(), ZoneId.of("America/New_York"))
         assertEquals(Instant.parse("2026-03-08T07:30:00Z").toEpochMilli(), next)
     }
+
+    @Test fun multipleAlarmsSelectTheNextTimeEvenWhenUnsorted() {
+        val config = VerseAlarmConfig(true, 20, 0, sessions = 7,
+            additionalTimes = listOf(VerseAlarmTime(7, 30), VerseAlarmTime(12, 0)))
+        val zone = ZoneId.of("UTC")
+        fun at(time: String) = Instant.parse("2026-10-26T${time}:00Z").toEpochMilli()
+        assertEquals(at("07:30"), VerseAlarmRules.nextDaily(config, at("06:00"), zone))
+        assertEquals(at("12:00"), VerseAlarmRules.nextDaily(config, at("07:30"), zone))
+        assertEquals(at("20:00"), VerseAlarmRules.nextDaily(config, at("12:00"), zone))
+        assertEquals(at("07:30") + 86_400_000, VerseAlarmRules.nextDaily(config, at("20:00"), zone))
+    }
+
+    @Test fun validatesSessionCountsAndRejectsDuplicateOrInvalidTimes() {
+        assertTrue(VerseAlarmConfig(sessions = 1).valid())
+        assertTrue(VerseAlarmConfig(sessions = 20).valid())
+        assertFalse(VerseAlarmConfig(sessions = 0).valid())
+        assertFalse(VerseAlarmConfig(sessions = 21).valid())
+        assertFalse(VerseAlarmConfig(additionalTimes = listOf(VerseAlarmTime(7, 0))).valid())
+        assertFalse(VerseAlarmConfig(additionalTimes = listOf(VerseAlarmTime(24, 0))).valid())
+        assertFalse(VerseAlarmConfig(additionalTimes = listOf(VerseAlarmTime(8, 60))).valid())
+        assertFalse(VerseAlarmConfig(additionalTimes = (1..24).map { VerseAlarmTime(0, it) }).valid())
+    }
+
+    @Test fun longQuietTimesAreNotClampedToTheFiveMinuteFollowUp() {
+        val now = WatchdogClock(1_000_000, 10_000, 8)
+        val quiet = VerseChallenge("c", "v", 0, false,
+            now.wall + 900_000, now.elapsed + 900_000, now.boot, quietUsed = true, quietDurationMs = 900_000)
+        assertEquals(900_000L, quiet.remaining(now))
+        assertEquals(840_000L, quiet.remaining(now.copy(wall = now.wall + 60_000, elapsed = 1000, boot = 9)))
+        assertEquals(900_000L, quiet.remaining(now.copy(wall = now.wall + 9_000_000)))
+        assertEquals(900_000L, quiet.remaining(now.copy(wall = now.wall - 9_000_000, boot = 9)))
+        assertFalse(quiet.ringing(now.copy(elapsed = now.elapsed + 899_999)))
+        assertTrue(quiet.ringing(now.copy(elapsed = now.elapsed + 900_000)))
+    }
 }

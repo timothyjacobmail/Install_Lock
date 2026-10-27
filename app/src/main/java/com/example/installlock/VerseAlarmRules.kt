@@ -5,18 +5,27 @@ import java.time.ZoneId
 import java.util.Locale
 
 internal data class AlarmVerse(val id: String, val reference: String, val text: String,
-    val successes: Int = 0, val lastUsed: Long = 0)
+    val successes: Int = 0, val lastUsed: Long = 0, val quietSeconds: Int = 60)
+
+internal data class VerseAlarmTime(val hour: Int, val minute: Int) {
+    fun valid() = hour in 0..23 && minute in 0..59
+}
 
 internal data class VerseAlarmConfig(val enabled: Boolean = false, val hour: Int = 7,
-    val minute: Int = 0, val memoryAfter: Int = 3) {
-    fun valid() = hour in 0..23 && minute in 0..59 && memoryAfter in 2..20
+    val minute: Int = 0, val memoryAfter: Int = 3, val sessions: Int = 3,
+    val additionalTimes: List<VerseAlarmTime> = emptyList()) {
+    val times get() = listOf(VerseAlarmTime(hour, minute)) + additionalTimes
+    fun valid() = times.size <= 24 && times.all { it.valid() } &&
+        times.distinct().size == times.size && memoryAfter in 2..20 && sessions in 1..20
 }
 
 internal data class VerseChallenge(val id: String, val verseId: String, val round: Int,
     val fromMemory: Boolean, val dueWall: Long, val dueElapsed: Long, val boot: Int,
-    val waiting: Boolean = false, val quietUsed: Boolean = false, val warningSent: Boolean = false) {
+    val waiting: Boolean = false, val quietUsed: Boolean = false, val warningSent: Boolean = false,
+    val quietDurationMs: Long = 60_000) {
     fun remaining(now: WatchdogClock): Long =
-        (if (now.boot == boot) dueElapsed - now.elapsed else dueWall - now.wall).coerceIn(0, 300_000)
+        (if (now.boot == boot) dueElapsed - now.elapsed else dueWall - now.wall)
+            .coerceIn(0, if (quietUsed) quietDurationMs else VerseAlarmRules.FOLLOW_UP_MS)
     fun ringing(now: WatchdogClock) = remaining(now) == 0L
     fun warning(now: WatchdogClock) = waiting && remaining(now) in 1..VerseAlarmRules.WARNING_MS
     fun canAnswer(now: WatchdogClock) = !waiting || remaining(now) <= VerseAlarmRules.WARNING_MS
@@ -24,7 +33,7 @@ internal data class VerseChallenge(val id: String, val verseId: String, val roun
 
 /** Pure rules shared by scheduling, the challenge screen and tests. */
 internal object VerseAlarmRules {
-    const val ROUNDS = 3
+    const val MAX_QUIET_SECONDS = 3600
     const val WARNING_MS = 60_000L
     const val FOLLOW_UP_MS = 5 * 60_000L
     const val CHANGE_DELAY_MINUTES = 15
@@ -65,9 +74,11 @@ internal object VerseAlarmRules {
 
     fun nextDaily(config: VerseAlarmConfig, now: Long, zone: ZoneId = ZoneId.systemDefault()): Long {
         val local = Instant.ofEpochMilli(now).atZone(zone)
-        var next = local.toLocalDate().atTime(config.hour, config.minute).atZone(zone)
-        if (!next.toInstant().isAfter(local.toInstant()))
-            next = local.toLocalDate().plusDays(1).atTime(config.hour, config.minute).atZone(zone)
-        return next.toInstant().toEpochMilli()
+        return config.times.minOf { time ->
+            var next = local.toLocalDate().atTime(time.hour, time.minute).atZone(zone)
+            if (!next.toInstant().isAfter(local.toInstant()))
+                next = local.toLocalDate().plusDays(1).atTime(time.hour, time.minute).atZone(zone)
+            next.toInstant().toEpochMilli()
+        }
     }
 }
