@@ -37,8 +37,8 @@ object Policy {
         // Stop the clock being changed to cheat the timer
         dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_DATE_TIME)
         dpm.setAutoTimeEnabled(admin, true)
-        // Stop this app being force-stopped / data-cleared
-        dpm.setUserControlDisabledPackages(admin, listOf(c.packageName))
+        // Preserve all configured protected apps when refreshing our own process protection.
+        enforceNoUninstall(c)
         if (Build.VERSION.SDK_INT >= 33) {
             dpm.setPermissionGrantState(
                 admin, c.packageName, Manifest.permission.POST_NOTIFICATIONS,
@@ -360,24 +360,33 @@ object Policy {
 
     /** Chosen apps (plus Install Lock itself) can't be uninstalled, force-stopped or have data cleared. */
     fun enforceNoUninstall(c: Context) {
+        if (!isOwner(c)) return
         val dpm = dpm(c)
         val admin = admin(c)
         val wanted = (Store.noUninstall(c) + c.packageName).filter { isInstalled(c, it) }
-        try {
-            for (pkg in wanted) {
+        for (pkg in wanted) {
+            try {
                 if (!dpm.isUninstallBlocked(admin, pkg)) dpm.setUninstallBlocked(admin, pkg, true)
+            } catch (e: RuntimeException) {
+                Log.w("InstallLock", "Could not protect $pkg from uninstall; will retry", e)
             }
+        }
+        // Force-stop/data-clear protection must still apply if one uninstall policy fails.
+        try {
             if (dpm.getUserControlDisabledPackages(admin).toSet() != wanted.toSet()) {
                 dpm.setUserControlDisabledPackages(admin, wanted)
             }
-        } catch (_: Exception) { }
+        } catch (e: RuntimeException) {
+            Log.w("InstallLock", "Could not protect selected apps from force stop/data clearing; will retry", e)
+        }
     }
 
-    /** Lifts the uninstall block for apps removed from the list. */
+    /** Lifts both protections for removed apps and reapplies them for the remaining selection. */
     fun allowUninstall(c: Context, pkgs: Collection<String>) {
         if (!isOwner(c)) return
-        for (pkg in pkgs) {
+        for (pkg in pkgs.filter { it != c.packageName }) {
             try { dpm(c).setUninstallBlocked(admin(c), pkg, false) } catch (_: Exception) { }
         }
+        enforceNoUninstall(c)
     }
 }

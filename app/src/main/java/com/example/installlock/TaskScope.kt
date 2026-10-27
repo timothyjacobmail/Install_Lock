@@ -12,7 +12,7 @@ enum class TaskKind(val title: String, val perApp: Boolean = false) {
     VPN_OFF("Turn off Google VPN"),
     DNS_UNBLOCK("Unblock Google DNS domains"),
     NEVER_REMOVE("Remove never-install rules"),
-    UNINSTALL_REMOVE("Remove uninstall protection"),
+    UNINSTALL_REMOVE("Remove uninstall and force-stop protection"),
     CURBOX_OFF("Turn off Curbox guard"),
     SCREENSHOTS_ALLOW("Allow screenshots"),
     TIMING("Change durations and waiting periods"),

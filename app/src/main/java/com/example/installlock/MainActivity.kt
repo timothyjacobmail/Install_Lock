@@ -296,9 +296,9 @@ class MainActivity : AppCompatActivity() {
                 Policy.sweep(this)
             }
             if (removed.isNotEmpty()) {
-                confirmTask(TaskScope(TaskKind.UNINSTALL_REMOVE), "Remove selected uninstall protection",
+                confirmTask(TaskScope(TaskKind.UNINSTALL_REMOVE), "Remove selected uninstall and force-stop protection",
                     mapOf("remove" to removed.toList(), "add" to (chosen - selected).toList()),
-                    delayedTitle = "Remove uninstall protection from ${removed.joinToString()}")
+                    delayedTitle = "Remove uninstall and force-stop protection from ${removed.joinToString()}")
             } else {
                 commit()
                 back()
@@ -309,7 +309,7 @@ class MainActivity : AppCompatActivity() {
         val col = LinearLayout(this)
         col.orientation = LinearLayout.VERTICAL
         col.setPadding(dp(16), dp(16), dp(16), dp(16))
-        col.addView(label("Prevent-uninstall apps", 22f))
+        col.addView(label("Prevent uninstall & force stop", 22f))
         col.addView(label("Ticked apps can't be uninstalled, force-stopped or have their data cleared. " +
                 "Install Lock is always protected. Unticking an app uses its saved password delay."))
         col.addView(list, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -539,7 +539,7 @@ class MainActivity : AppCompatActivity() {
                 button("App locks") { goTo { showAppPicker() } },
                 button("Lock protected apps now") { Store.lockProtectedApps(this); Policy.sweep(this); reopen() },
                 button("Never-install list") { goTo { showNeverInstall() } },
-                button("Prevent-uninstall apps") { goTo { showNoUninstallPicker() } }),
+                button("Prevent uninstall & force stop") { goTo { showNoUninstallPicker() } }),
             browserActions(),
             additionalProtections(),
             section("Settings & passwords", "Each save and password change is scoped to its own task",
@@ -602,7 +602,7 @@ class MainActivity : AppCompatActivity() {
         add(SearchDestination("Temporary app access", "unlock apps duration timer lock protected apps now") { showAppAccess() })
         add(SearchDestination("App locks", "apps add remove permanent lock access limit passwords") { showAppPicker() })
         add(SearchDestination("Never-install list", "apps block ban install uninstall remove") { showNeverInstall() })
-        add(SearchDestination("Prevent-uninstall apps", "apps uninstall protection remove force stop clear data") { showNoUninstallPicker() })
+        add(SearchDestination("Prevent uninstall & force stop", "apps uninstall protection remove force stop clear data") { showNoUninstallPicker() })
         add(SearchDestination("Ordered domain rules", "browser website block allow reorder move domain") { showDomainRules() })
         add(SearchDestination("Chrome whitelist", "browser website site whitelist password delay turn off on") { showChromeSites() })
         add(SearchDestination("Add a whitelist site", "chrome browser website allow add whitelist") { showAddSite() })
