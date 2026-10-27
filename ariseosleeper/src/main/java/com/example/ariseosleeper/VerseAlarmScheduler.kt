@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.app.AlarmManager
 import android.app.NotificationChannel
@@ -12,9 +12,9 @@ import android.os.Build
 import android.util.Log
 
 internal object VerseAlarmScheduler {
-    const val FIRE = "com.example.installlock.VERSE_ALARM"
-    const val CHANGE = "com.example.installlock.VERSE_ALARM_CHANGE"
-    const val WARN = "com.example.installlock.VERSE_ALARM_WARN"
+    const val FIRE = "com.example.ariseosleeper.VERSE_ALARM"
+    const val CHANGE = "com.example.ariseosleeper.VERSE_ALARM_CHANGE"
+    const val WARN = "com.example.ariseosleeper.VERSE_ALARM_WARN"
     const val CHANNEL = "verse_alarm"
     const val NOTIFICATION = 4701
 
@@ -50,7 +50,7 @@ internal object VerseAlarmScheduler {
     }
 
     fun reschedule(c: Context, timeChanged: Boolean = false, boot: Boolean = false) {
-        val now = WatchdogStore.clock(c)
+        val now = AlarmClock.now(c)
         val s = VerseAlarmStore.reconcile(c, now, timeChanged)
         VerseAlarmVolume.sync(c)
         val manager = c.getSystemService(AlarmManager::class.java)
@@ -94,7 +94,7 @@ internal object VerseAlarmScheduler {
         VerseAlarmWarning.sync(c)
         reschedule(c)
         val ch = VerseAlarmStore.read(c).challenge
-        if (ch?.ringing(WatchdogStore.clock(c)) == true) {
+        if (ch?.ringing(AlarmClock.now(c)) == true) {
             try { c.startForegroundService(Intent(c, VerseAlarmService::class.java)) }
             catch (e: RuntimeException) { Log.e("VerseAlarm", "Could not start alarm audio", e) }
         } else c.stopService(Intent(c, VerseAlarmService::class.java))

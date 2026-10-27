@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import java.time.Instant
 import java.time.ZoneId
@@ -23,12 +23,12 @@ internal data class VerseChallenge(val id: String, val verseId: String, val roun
     val fromMemory: Boolean, val dueWall: Long, val dueElapsed: Long, val boot: Int,
     val waiting: Boolean = false, val quietUsed: Boolean = false, val warningSent: Boolean = false,
     val quietDurationMs: Long = 60_000) {
-    fun remaining(now: WatchdogClock): Long =
+    fun remaining(now: AlarmClockSnapshot): Long =
         (if (now.boot == boot) dueElapsed - now.elapsed else dueWall - now.wall)
             .coerceIn(0, if (quietUsed) quietDurationMs else VerseAlarmRules.FOLLOW_UP_MS)
-    fun ringing(now: WatchdogClock) = remaining(now) == 0L
-    fun warning(now: WatchdogClock) = waiting && remaining(now) in 1..VerseAlarmRules.WARNING_MS
-    fun canAnswer(now: WatchdogClock) = !waiting || remaining(now) <= VerseAlarmRules.WARNING_MS
+    fun ringing(now: AlarmClockSnapshot) = remaining(now) == 0L
+    fun warning(now: AlarmClockSnapshot) = waiting && remaining(now) in 1..VerseAlarmRules.WARNING_MS
+    fun canAnswer(now: AlarmClockSnapshot) = !waiting || remaining(now) <= VerseAlarmRules.WARNING_MS
 }
 
 /** Pure rules shared by scheduling, the challenge screen and tests. */

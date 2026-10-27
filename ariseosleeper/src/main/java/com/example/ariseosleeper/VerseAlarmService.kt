@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.app.Notification
 import android.app.NotificationManager
@@ -32,7 +32,7 @@ class VerseAlarmService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             val ch = VerseAlarmStore.reconcile(this@VerseAlarmService).challenge
-            if (ch?.ringing(WatchdogStore.clock(this@VerseAlarmService)) != true) {
+            if (ch?.ringing(AlarmClock.now(this@VerseAlarmService)) != true) {
                 stopSelf()
                 return
             }
@@ -49,7 +49,7 @@ class VerseAlarmService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         VerseAlarmVolume.sync(this)
-        if (VerseAlarmStore.reconcile(this).challenge?.ringing(WatchdogStore.clock(this)) != true) {
+        if (VerseAlarmStore.reconcile(this).challenge?.ringing(AlarmClock.now(this)) != true) {
             stopSelf()
             return START_NOT_STICKY
         }
@@ -68,7 +68,7 @@ class VerseAlarmService : Service() {
         else startForeground(VerseAlarmScheduler.NOTIFICATION, notification)
         announced = true
         if (wake == null) wake = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "InstallLock:verseAlarm").apply { setReferenceCounted(false) }
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AriseOSleeper:verseAlarm").apply { setReferenceCounted(false) }
         if (ringtone == null) {
             val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
                 ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)

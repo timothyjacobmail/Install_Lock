@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.content.Context
 import android.database.ContentObserver

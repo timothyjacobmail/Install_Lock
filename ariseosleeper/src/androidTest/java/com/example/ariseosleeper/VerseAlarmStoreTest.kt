@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.content.Context
 import androidx.test.platform.app.InstrumentationRegistry
@@ -9,7 +9,7 @@ import org.junit.Assert.*
 
 class VerseAlarmStoreTest {
     private val c = InstrumentationRegistry.getInstrumentation().targetContext
-    private val start = WatchdogClock(1_000_000, 10_000, 8)
+    private val start = AlarmClockSnapshot(1_000_000, 10_000, 8)
     private val text = "Wake up and open the window to begin a new day."
     private var original: String? = null
     private val prefs get() = c.createDeviceProtectedStorageContext().getSharedPreferences("verse_alarm", Context.MODE_PRIVATE)
@@ -20,7 +20,7 @@ class VerseAlarmStoreTest {
     }
     @After fun restore() { prefs.edit().clear().putString("state", original).commit() }
 
-    private fun ring(): Pair<WatchdogClock, VerseChallenge> {
+    private fun ring(): Pair<AlarmClockSnapshot, VerseChallenge> {
         VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true, 7, 0, 2), start)
         val due = VerseAlarmStore.read(c).nextAlarm
         val now = start.copy(wall = due, elapsed = start.elapsed + due - start.wall)
@@ -57,7 +57,7 @@ class VerseAlarmStoreTest {
     }
 
     @Test fun addingPassagesWhileDailyAlarmIsEnabledPreservesItsSchedule() {
-        val now = WatchdogStore.clock(c)
+        val now = AlarmClock.now(c)
         val wakeTime = java.time.Instant.ofEpochMilli(now.wall).atZone(java.time.ZoneId.systemDefault()).plusHours(2)
         VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true, wakeTime.hour, wakeTime.minute, 4), now)
         val before = VerseAlarmStore.read(c)

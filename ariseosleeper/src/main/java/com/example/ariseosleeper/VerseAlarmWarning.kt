@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.RingtoneManager
-import android.util.Log
 
 internal object VerseAlarmWarning {
     const val CHANNEL = "verse_alarm_warning"
@@ -23,7 +22,7 @@ internal object VerseAlarmWarning {
     }
 
     fun sync(c: Context) {
-        val now = WatchdogStore.clock(c)
+        val now = AlarmClock.now(c)
         val state = VerseAlarmStore.read(c)
         val ch = state.challenge
         val manager = c.getSystemService(NotificationManager::class.java)
@@ -38,9 +37,6 @@ internal object VerseAlarmWarning {
             .setContentIntent(VerseAlarmScheduler.content(c))
             .setFullScreenIntent(VerseAlarmScheduler.content(c), true)
             .setTimeoutAfter(warning.remaining(now)).setAutoCancel(true).build())
-        // Device-owner mode can present the requested alarm page directly.
-        // Otherwise the full-screen notification or its tap action opens it.
-        if (Policy.isOwner(c)) try { c.startActivity(VerseAlarmScheduler.open(c)) }
-        catch (e: RuntimeException) { Log.w("VerseAlarm", "Use the warning notification to open the verse", e) }
+        // Android presents the full-screen notification or opens the screen on its tap.
     }
 }

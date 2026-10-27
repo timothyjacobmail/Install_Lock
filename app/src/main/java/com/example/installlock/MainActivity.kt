@@ -530,7 +530,6 @@ class MainActivity : AppCompatActivity() {
             button("Pending tasks") { goTo { showScheduledTasks() } },
             button("Delayed Secrets") { startActivity(Intent(this, com.example.delayedsecrect.MainActivity::class.java)) },
             button("Why apps are locked") { goTo { showLockReasons() } },
-            button("Verse wake-up alarm") { startActivity(Intent(this, VerseAlarmActivity::class.java)) },
             curfewActions(),
             focusActions(),
             watchdogActions(),
@@ -623,9 +622,6 @@ class MainActivity : AppCompatActivity() {
             screen(label("Additional protections", 22f), additionalProtections(), button("Back") { back() })
         })
         add(SearchDestination("About & licenses", "about licenses font website category data") { showAbout() })
-        add(SearchDestination("Verse wake-up alarm", "alarm clock bible esv memory recite dictate wake sleep") {
-            startActivity(Intent(this@MainActivity, VerseAlarmActivity::class.java))
-        })
     }
 
     private fun showNeverInstall() {

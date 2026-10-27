@@ -1,0 +1,36 @@
+<resources>
+    <style name="Theme.AriseOSleeper" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/il_primary</item>
+        <item name="colorOnPrimary">@color/il_on_primary</item>
+        <item name="colorPrimaryContainer">@color/il_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/il_on_primary_container</item>
+        <item name="colorSecondary">@color/il_secondary</item>
+        <item name="colorOnSecondary">@color/il_on_primary</item>
+        <item name="colorSecondaryContainer">@color/il_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/il_on_secondary_container</item>
+        <item name="colorTertiary">@color/il_tertiary</item>
+        <item name="colorTertiaryContainer">@color/il_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/il_on_tertiary_container</item>
+        <item name="colorSurface">@color/il_surface</item>
+        <item name="colorOnSurface">@color/il_on_surface</item>
+        <item name="colorSurfaceContainer">@color/il_container</item>
+        <item name="colorSurfaceContainerLow">@color/il_container_low</item>
+        <item name="colorSurfaceContainerHigh">@color/il_container_high</item>
+        <item name="colorSurfaceVariant">@color/il_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/il_on_surface_variant</item>
+        <item name="colorOutline">@color/il_outline</item>
+        <item name="colorOutlineVariant">@color/il_outline_variant</item>
+        <item name="colorError">@color/il_error</item>
+        <item name="android:colorBackground">@color/il_surface</item>
+        <item name="android:windowBackground">@color/il_surface</item>
+        <item name="android:colorAccent">@color/il_primary</item>
+        <item name="android:textColorPrimary">@color/il_on_surface</item>
+        <item name="android:textColorSecondary">@color/il_on_surface_variant</item>
+        <item name="fontFamily">@font/inter</item>
+        <item name="android:fontFamily">@font/inter</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">@bool/il_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/il_light_system_bars</item>
+    </style>
+</resources>

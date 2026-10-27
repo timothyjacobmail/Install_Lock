@@ -86,7 +86,6 @@ object Policy {
 
     private fun reconcile(c: Context, collectStatus: Boolean, releaseTargets: Set<String> = emptySet()): List<AppLockStatus> {
         if (!isOwner(c)) return emptyList()
-        VerseAlarmVolume.sync(c)
         enforceNoUninstall(c)
         val dpm = dpm(c)
         val admin = admin(c)

@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.content.ActivityNotFoundException
 import android.content.Intent
@@ -125,7 +125,7 @@ class VerseAlarmActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val now = WatchdogStore.clock(this)
+        val now = AlarmClock.now(this)
         val s = VerseAlarmStore.reconcile(this, now)
         val ch = s.challenge
         if (ch != null) practice = null
@@ -211,7 +211,7 @@ class VerseAlarmActivity : AppCompatActivity() {
         status = label("")
         answer = responseField()
         val result = label("")
-        show(listOf(label(if (ch.warning(WatchdogStore.clock(this))) "One-minute alarm warning" else "Verse wake-up", 26f), status!!, label("${v.reference} · ESV", 22f),
+        show(listOf(label(if (ch.warning(AlarmClock.now(this))) "One-minute alarm warning" else "Verse wake-up", 26f), status!!, label("${v.reference} · ESV", 22f),
             label(if (ch.fromMemory) "From memory — you have completed this passage ${v.successes} times."
                 else "Learning — ${v.successes}/${s.config.memoryAfter} completions before memory mode."),
             label(if (ch.fromMemory) "Write or recite the passage from memory. The text stays hidden during this challenge." else v.text),
@@ -230,7 +230,7 @@ class VerseAlarmActivity : AppCompatActivity() {
             },
             button("Quiet for ${v.quietSeconds} seconds") {
                 attempt { VerseAlarmStore.quiet(this, ch.id) }
-            }.apply { isEnabled = !ch.quietUsed && ch.ringing(WatchdogStore.clock(this@VerseAlarmActivity)) }, result,
+            }.apply { isEnabled = !ch.quietUsed && ch.ringing(AlarmClock.now(this@VerseAlarmActivity)) }, result,
             button("Alarm settings") { editingSettings = true; rendered = ""; refresh() },
             label("One quiet period of ${v.quietSeconds} seconds per check, shared with dictation. Alarm volume stays fixed until all checks are complete.")))
     }
@@ -299,11 +299,11 @@ class VerseAlarmActivity : AppCompatActivity() {
         }
         val memoryLabel = label("Successful completions before memory mode").apply { labelFor = threshold.id }
         val needs = VerseAlarmScheduler.readiness(this)
-        val views = mutableListOf<View>(label("Verse wake-up", 26f), status!!,
+        val views = mutableListOf<View>(label(getString(R.string.app_name), 26f), status!!,
             label("Learn a passage with its text visible, then write or recite it from memory. Each verse has its own count. Choose the number of sessions (verse checks) per alarm, five minutes apart. A one-minute warning lets you finish each verse before the alarm rings."),
             label("Daily times follow your phone's time zone. Settings changes save immediately when no wake-up routine is running. During a routine, changes have a 15-minute wait and cannot end the current routine. The wait ends when all checks are complete."),
             label(if (needs.isEmpty()) "Alarm permissions are ready. Test the sound and dictation on your phone before relying on this alarm."
-                else "Setup needed in Android Settings for Install Lock:\n${needs.joinToString("\n")}"),
+                else "Setup needed in Android Settings for Arise O Sleeper!:\n${needs.joinToString("\n")}"),
             button("Sound settings") { openSetting(Intent(Settings.ACTION_SOUND_SETTINGS)) },
             button("Test alarm sound · 5 seconds") {
                 previewSound?.stop()
@@ -367,7 +367,7 @@ class VerseAlarmActivity : AppCompatActivity() {
             views.add(button("Practice ${v.reference}") { practice = v; rendered = ""; refresh() })
             if (!s.config.enabled) views.add(button("Remove ${v.reference}") { attempt { VerseAlarmStore.removeVerse(this, v.id) } })
         }
-        views.add(button(if (s.challenge != null) "Back to wake-up check" else "Back") {
+        views.add(button(if (s.challenge != null) "Back to wake-up check" else "Close app") {
             if (s.challenge != null) { editingSettings = false; rendered = ""; refresh() } else finish()
         })
         show(views)

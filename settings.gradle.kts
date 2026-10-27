@@ -25,4 +25,4 @@ dependencyResolutionManagement {
 rootProject.name = "Install Lock"
 include(":app")
 include(":secretvault")
-
+include(":ariseosleeper")

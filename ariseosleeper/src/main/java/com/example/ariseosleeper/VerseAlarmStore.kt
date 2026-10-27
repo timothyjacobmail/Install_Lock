@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.content.Context
 import org.json.JSONArray
@@ -8,22 +8,22 @@ import java.util.UUID
 internal data class VerseAlarmState(val config: VerseAlarmConfig = VerseAlarmConfig(),
     val verses: List<AlarmVerse> = emptyList(), val challenge: VerseChallenge? = null,
     val nextAlarm: Long = 0, val pending: VerseAlarmConfig? = null,
-    val countdown: TaskCountdown? = null, val everArmed: Boolean = false) {
-    fun requestConfig(config: VerseAlarmConfig, now: WatchdogClock): VerseAlarmState =
+    val countdown: AlarmChangeCountdown? = null, val everArmed: Boolean = false) {
+    fun requestConfig(config: VerseAlarmConfig, now: AlarmClockSnapshot): VerseAlarmState =
         if (challenge == null) copy(config = config, everArmed = everArmed || config.enabled,
             pending = null, countdown = null,
             nextAlarm = if (config.enabled) VerseAlarmRules.nextDaily(config, now.wall) else 0)
         else copy(pending = config,
-            countdown = TaskCountdown.start(VerseAlarmRules.CHANGE_DELAY_MINUTES, now))
+            countdown = AlarmChangeCountdown.start(VerseAlarmRules.CHANGE_DELAY_MINUTES, now))
 
     /** The alteration wait is relevant only while a routine is still active. */
-    fun applyPendingIfIdle(now: WatchdogClock): VerseAlarmState {
+    fun applyPendingIfIdle(now: AlarmClockSnapshot): VerseAlarmState {
         val requested = pending ?: return this
         if (challenge != null || (requested.enabled && verses.isEmpty())) return this
         return requestConfig(requested, now)
     }
 
-    fun nextWarningAt(now: WatchdogClock): Long? {
+    fun nextWarningAt(now: AlarmClockSnapshot): Long? {
         val ch = challenge
         val due = if (ch == null) {
             if (!config.enabled || nextAlarm <= now.wall) return null
@@ -65,7 +65,7 @@ internal object VerseAlarmStore {
             it.getBoolean("waiting"), it.getBoolean("quietUsed"), it.optBoolean("warningSent"),
             it.optLong("quietDurationMs", 60_000)) }
         val countdown = o.optJSONObject("countdown")?.let {
-            TaskCountdown(it.getLong("due"), it.getInt("boot"), it.getLong("duration")) }
+            AlarmChangeCountdown(it.getLong("due"), it.getInt("boot"), it.getLong("duration")) }
         return VerseAlarmState(config(o.getJSONObject("config")), verses, challenge,
             o.getLong("nextAlarm"), o.optJSONObject("pending")?.let(::config), countdown,
             o.optBoolean("everArmed"))
@@ -89,7 +89,7 @@ internal object VerseAlarmStore {
         check(prefs(c).edit().putString("state", o.toString()).commit()) { "Could not save the alarm." }
     }
 
-    @Synchronized fun saveConfig(c: Context, config: VerseAlarmConfig, now: WatchdogClock = WatchdogStore.clock(c)) {
+    @Synchronized fun saveConfig(c: Context, config: VerseAlarmConfig, now: AlarmClockSnapshot = AlarmClock.now(c)) {
         require(config.valid())
         val s = reconcile(c, now)
         require(!config.enabled || s.verses.isNotEmpty()) { "Add an ESV passage first." }
@@ -128,7 +128,7 @@ internal object VerseAlarmStore {
         write(c, s.copy(verses = s.verses.filterNot { it.id == id }))
     }
 
-    private fun challenge(s: VerseAlarmState, round: Int, now: WatchdogClock, delay: Long =
+    private fun challenge(s: VerseAlarmState, round: Int, now: AlarmClockSnapshot, delay: Long =
         if (round == 0) 0L else VerseAlarmRules.FOLLOW_UP_MS): VerseChallenge {
         val v = VerseAlarmRules.choose(s.verses, s.config.memoryAfter, round)
         return VerseChallenge(UUID.randomUUID().toString(), v.id, round,
@@ -136,7 +136,7 @@ internal object VerseAlarmStore {
             now.boot, waiting = delay > 0)
     }
 
-    @Synchronized fun reconcile(c: Context, now: WatchdogClock = WatchdogStore.clock(c),
+    @Synchronized fun reconcile(c: Context, now: AlarmClockSnapshot = AlarmClock.now(c),
         timeChanged: Boolean = false): VerseAlarmState {
         val old = read(c)
         var s = old
@@ -160,7 +160,7 @@ internal object VerseAlarmStore {
     }
 
     @Synchronized fun answer(c: Context, id: String, answer: String, dictated: Boolean,
-        now: WatchdogClock = WatchdogStore.clock(c)): Boolean {
+        now: AlarmClockSnapshot = AlarmClock.now(c)): Boolean {
         val s = reconcile(c, now)
         val ch = s.challenge ?: return false
         if (ch.id != id || !ch.canAnswer(now)) return false
@@ -174,7 +174,7 @@ internal object VerseAlarmStore {
     }
 
     /** Commit once per check so duplicate broadcasts and restarts do not repeat the chime. */
-    @Synchronized fun takeWarning(c: Context, now: WatchdogClock = WatchdogStore.clock(c)): VerseChallenge? {
+    @Synchronized fun takeWarning(c: Context, now: AlarmClockSnapshot = AlarmClock.now(c)): VerseChallenge? {
         val s = reconcile(c, now)
         val ch = s.challenge ?: return null
         if (!ch.warning(now) || ch.warningSent) return null
@@ -182,7 +182,7 @@ internal object VerseAlarmStore {
         return ch
     }
 
-    @Synchronized fun quiet(c: Context, id: String, now: WatchdogClock = WatchdogStore.clock(c)): Boolean {
+    @Synchronized fun quiet(c: Context, id: String, now: AlarmClockSnapshot = AlarmClock.now(c)): Boolean {
         val s = reconcile(c, now)
         val ch = s.challenge ?: return false
         if (ch.id != id || ch.quietUsed || !ch.ringing(now)) return false

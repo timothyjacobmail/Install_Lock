@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import org.junit.Assert.*
 import org.junit.Test
@@ -38,11 +38,11 @@ class VerseAlarmRulesTest {
 
     @Test fun followUpCannotBeSkippedByChangingWallClock() {
         val c = VerseChallenge("id", "verse", 1, false, 400_000, 310_000, 4, waiting = true)
-        assertEquals(300_000L, c.remaining(WatchdogClock(9_000_000, 10_000, 4)))
-        assertFalse(c.ringing(WatchdogClock(0, 309_999, 4)))
-        assertTrue(c.ringing(WatchdogClock(0, 310_000, 4)))
-        assertEquals(100_000L, c.remaining(WatchdogClock(300_000, 1000, 5)))
-        assertTrue(c.ringing(WatchdogClock(500_000, 1000, 5)))
+        assertEquals(300_000L, c.remaining(AlarmClockSnapshot(9_000_000, 10_000, 4)))
+        assertFalse(c.ringing(AlarmClockSnapshot(0, 309_999, 4)))
+        assertTrue(c.ringing(AlarmClockSnapshot(0, 310_000, 4)))
+        assertEquals(100_000L, c.remaining(AlarmClockSnapshot(300_000, 1000, 5)))
+        assertTrue(c.ringing(AlarmClockSnapshot(500_000, 1000, 5)))
     }
 
     @Test fun dailyTimeUsesLocalZoneAndRollsToTomorrowAtBoundary() {
@@ -83,7 +83,7 @@ class VerseAlarmRulesTest {
     }
 
     @Test fun longQuietTimesAreNotClampedToTheFiveMinuteFollowUp() {
-        val now = WatchdogClock(1_000_000, 10_000, 8)
+        val now = AlarmClockSnapshot(1_000_000, 10_000, 8)
         val quiet = VerseChallenge("c", "v", 0, false,
             now.wall + 900_000, now.elapsed + 900_000, now.boot, quietUsed = true, quietDurationMs = 900_000)
         assertEquals(900_000L, quiet.remaining(now))

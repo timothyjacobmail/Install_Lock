@@ -1,10 +1,10 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import org.junit.Assert.*
 import org.junit.Test
 
 class VerseAlarmSettingsTest {
-    private val now = WatchdogClock(1_000_000, 10_000, 8)
+    private val now = AlarmClockSnapshot(1_000_000, 10_000, 8)
     private val verse = AlarmVerse("v", "Test", "Original test passage.")
     private val enabled = VerseAlarmConfig(true)
     private val off = VerseAlarmConfig(false)
@@ -51,7 +51,7 @@ class VerseAlarmSettingsTest {
     }
 
     @Test fun existingIdleQueueFromOlderVersionsAppliesWithoutAWait() {
-        val old = idle.copy(pending = off, countdown = TaskCountdown.start(15, now))
+        val old = idle.copy(pending = off, countdown = AlarmChangeCountdown.start(15, now))
         val migrated = old.applyPendingIfIdle(now)
         assertFalse(migrated.config.enabled)
         assertNull(migrated.countdown)

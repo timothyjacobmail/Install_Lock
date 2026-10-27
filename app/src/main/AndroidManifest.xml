@@ -5,12 +5,8 @@
     <!-- Device-owner enforcement must include newly installed apps, including those without launcher activities. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Scheduled unlock tasks and Delayed Secrets still use exact timers. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -23,22 +19,6 @@
         android:icon="@mipmap/ic_launcher"
         android:label="Install Lock"
         android:theme="@style/Theme.InstallLock">
-
-        <activity android:name=".VerseAlarmActivity" android:exported="false"
-            android:directBootAware="true" android:launchMode="singleTop"
-            android:windowSoftInputMode="adjustResize" />
-        <service android:name=".VerseAlarmService" android:exported="false"
-            android:directBootAware="true" android:foregroundServiceType="mediaPlayback" />
-        <receiver android:name=".VerseAlarmReceiver" android:exported="false" android:directBootAware="true">
-            <intent-filter>
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-                <action android:name="android.intent.action.TIME_SET" />
-                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
-                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
-            </intent-filter>
-        </receiver>
 
         <activity android:name=".DelayedUnlockActivity" android:exported="false"
             android:excludeFromRecents="true" />

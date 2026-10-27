@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import org.junit.Assert.*
 import org.junit.Test

@@ -1,10 +1,10 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import org.junit.Assert.*
 import org.junit.Test
 
 class VerseAlarmWarningTest {
-    private val now = WatchdogClock(1_000_000, 10_000, 8)
+    private val now = AlarmClockSnapshot(1_000_000, 10_000, 8)
     private val check = VerseChallenge("c", "v", 1, true, now.wall + 300_000,
         now.elapsed + 300_000, now.boot, waiting = true)
     private fun after(ms: Long) = now.copy(wall = now.wall + ms, elapsed = now.elapsed + ms)

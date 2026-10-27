@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 internal interface AlarmVolumeAccess {
     fun savedLevel(): Int?

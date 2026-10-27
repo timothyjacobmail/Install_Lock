@@ -78,7 +78,6 @@ internal object UiStyle {
             stateListAnimator = null
             val buttonIcon = when {
                 text.contains("delayed secrets", ignoreCase = true) -> R.drawable.ic_il_secret
-                text == "Verse wake-up alarm" -> R.drawable.ic_il_alarm
                 else -> null
             }
             if (buttonIcon != null) {

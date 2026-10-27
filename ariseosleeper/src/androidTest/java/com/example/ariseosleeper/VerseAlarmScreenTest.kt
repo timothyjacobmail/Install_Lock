@@ -1,4 +1,4 @@
-package com.example.installlock
+package com.example.ariseosleeper
 
 import android.content.Context
 import android.content.Intent
@@ -25,7 +25,7 @@ class VerseAlarmScreenTest {
         try {
             prefs.edit().clear().commit()
             VerseAlarmStore.addVerse(c, "Original test prose", "Wake up and open the window to begin a new day.", 900)
-            val now = WatchdogStore.clock(c)
+            val now = AlarmClock.now(c)
             VerseAlarmStore.saveConfig(c, VerseAlarmConfig(true), now.copy(wall = now.wall - 86_400_000))
             VerseAlarmStore.reconcile(c, now)
             ActivityScenario.launch<VerseAlarmActivity>(Intent(c, VerseAlarmActivity::class.java)).use { scenario ->
